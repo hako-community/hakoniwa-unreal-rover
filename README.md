@@ -36,7 +36,7 @@ pwsh scripts\windows\rover_scene.ps1 -Open           # エディタで開く（P
 | 座標 | 局所（右手系 m・x 前 y 左 z 上）→ Unreal = (100x, −100y, 100z)（`RoverFrame.h`） |
 | 光 | 太陽（平行光・`sun.json` の向き・照度・視直径 0.53°）、地球（50 km 先の球。太陽に照らされて満ち欠けが出る）、地球照（弱い平行光）。空の光・大気・霧は置かない |
 | 写り | 自動露出なし・物理カメラ（ISO 100・1/125 s・f/16）。局所露出は切る（`RoverLunarLook.h`） |
-| ローバ | GLB を 1 メッシュに結合して取り込み、原点に地形の傾きに合わせて置く（静止。関節の同期はこれから） |
+| ローバ | GLB を 1 メッシュに結合して取り込み、原点に地形の傾きに合わせて置く（静止。関節の同期はこれから）。★ メッシュは git に入れない（`/Content/Rover/Vehicles` は管理外）。clone したら `-Build` で各自の PC で作る（GLB は `-Glb` で指定、省略時は mujoco-rover の `bodies\*\source\*.glb`）。作るまでは地図にローバが映らない |
 | 撮影 | `ARoverShotDirector`：タグ `RoverShot` のシネカメラを順に撮り、フレーム時間を `shots.json` に書く。`-RoverProbeIn/Out` で地形の高さを測る |
 
 * ★ `ADirectionalLight` は生成時に光へピッチ −46° を入れている。スポーンの回転に足されるので、回転は生成のあとで決める。
