@@ -87,9 +87,10 @@ Plugins/HakoniwaPdu/Source/ThirdParty/shakoc/
 # Cache files for the editor to use
 DerivedDataCache/*
 
-# hakodrone（内蔵 FC）一式は native.lock.json の版で取ってくる（scripts/windows/fetch_native.ps1）。git に入れない。
-# ThirdParty/HakoDrone/Include/hakodrone.h と ThirdParty/HakoDrone/LICENSE.md は管理する（取得しなくてもコンパイルできる）。
-/ThirdParty/HakoDrone/Win64/*
-/ThirdParty/HakoDrone/Android/*
-# 機体の物理の定義（hakodrone と同じ版で取ってくる）。git に入れない。
-/SimModels/courses_drone/
+# 旧 drone の取得物（ドローン部分は 2026-10-18 に外した）。手元に残っていれば消してよい。
+/ThirdParty/
+/SimModels/
+/Plugins/HakoniwaDroneService/
+
+# ローバのメッシュ（取り込んだもの）は公開しない。各自の PC で scripts/windows/rover_scene.ps1 -Build が GLB から作る
+/Content/Rover/Vehicles/

@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [Parameter()]
     [string]$EngineRoot,
@@ -87,13 +87,13 @@ function Set-SdkEnvironmentFromRoot {
 }
 
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
-$projectFile = Join-Path $projectRoot 'HakoniwaDrone.uproject'
+$projectFile = Join-Path $projectRoot 'HakoniwaRover.uproject'
 Assert-File -Path $projectFile -Description 'Unreal project'
 
 $projectDescriptor = Get-Content -LiteralPath $projectFile -Raw | ConvertFrom-Json
 $engineAssociation = [string]$projectDescriptor.EngineAssociation
 if ([string]::IsNullOrWhiteSpace($engineAssociation)) {
-    throw 'HakoniwaDrone.uproject does not define EngineAssociation.'
+    throw 'HakoniwaRover.uproject does not define EngineAssociation.'
 }
 
 if ([string]::IsNullOrWhiteSpace($EngineRoot)) {
@@ -136,31 +136,14 @@ $null = Resolve-DependencyFile `
 
 Write-Step 'Environment-based build dependencies are valid.'
 
-# hakodrone.dll + mujoco.dll と機体の定義（SimModels/courses_drone）を native.lock.json の版で取ってくる。
-# 取得済みなら素早く抜ける。HAKO_SKIP_FETCH_NATIVE=1 で飛ばせる（DLL が無くてもモジュールはコンパイルできる）。
-Write-Step 'Fetching native libraries (native.lock.json)...'
-& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'fetch_native.ps1') -Root $projectRoot
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "[setup-build] ERROR: fetch_native.ps1 failed (see above)." -ForegroundColor Red
-    exit 1
-}
-# コンパイルに使うヘッダは ThirdParty/HakoDrone/Include で管理している。取ってきたものと違えば知らせる。
-$trackedHeader = Join-Path $projectRoot 'ThirdParty\HakoDrone\Include\hakodrone.h'
-$fetchedHeader = Join-Path $projectRoot 'ThirdParty\HakoDrone\Win64\hakodrone.h'
-if ((Test-Path $trackedHeader) -and (Test-Path $fetchedHeader)) {
-    if ([Convert]::ToBase64String([System.IO.File]::ReadAllBytes($trackedHeader)) -ne [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($fetchedHeader))) {
-        Write-Host "[setup-build] WARNING: ThirdParty/HakoDrone/Include/hakodrone.h differs from the fetched header. Copy the fetched one if the ABI changed." -ForegroundColor Yellow
-    }
-}
-
 if ($ValidateOnly) {
     Write-Step 'ValidateOnly specified; skipping the Unreal build.'
     exit 0
 }
 
-Write-Step 'Building HakoniwaDroneEditor Win64 Development.'
+Write-Step 'Building HakoniwaRoverEditor Win64 Development.'
 & $buildBatch `
-    'HakoniwaDroneEditor' `
+    'HakoniwaRoverEditor' `
     'Win64' `
     'Development' `
     "-Project=$projectFile" `

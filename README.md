@@ -1,122 +1,46 @@
-# Hakoniwa Unreal Drone
+# Hakoniwa Unreal Rover
 
-このリポジトリは、箱庭ドローンシミュレータのビジュアライズ機能を提供する Unreal Engine プロジェクトです。
-Unreal Engine 5.8 を使用し、WebSocket または共有メモリ経由で取得した PDU 情報からドローンの状態を描画します。
+月面ローバの箱庭シミュレータ用の Unreal Engine 5.8 プロジェクトです。南極域の実地形（DEM）・位置暦の太陽と地球・物理カメラの露出で、月面の場面を描きます。
 
+* [hakoniwa-unreal-drone](https://github.com/hako-community/hakoniwa-unreal-drone) をコピーして始め、ドローンの部分（機体の C++・`HakoniwaDroneService`・ドローンの Level と Blueprint・hakodrone の取得）は外しました（2026-10-18）。
+  箱庭の PDU 通信（`Plugins/HakoniwaPdu`）は残しています（ローバの状態の同期に使う予定）。
+* 物理は [hakoniwa-mujoco-rover](https://github.com/hako-community/hakoniwa-mujoco-rover) が受け持ちます。このプロジェクトは描画だけです。
 
 ## セットアップ
 
-1. 本リポジトリをクローンします。
-   ```bash
-   git clone <repository_url>
-   ```
-2. Unreal Engine 5.8 をインストールします。
-3. `HakoniwaDrone.uproject` を Unreal Editor で開きます。
-4. 必要な外部SDKをインストールし、ビルドを実行してプロジェクトを起動します。
-
-Windowsでは、環境変数または標準インストール先から外部依存物を検証し、Editorビルドを次のスクリプトで実行できます。
+1. Unreal Engine 5.8 をインストールします。
+2. hakoniwa-mujoco-rover を**隣のフォルダ**に置きます（地形・位置暦・ローバの GLB を読むため）。
+3. 箱庭コアの `shakoc`（`HakoniwaPdu` が使う）を用意し、ビルドします。
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\windows\setup_build.ps1
+pwsh scripts\windows\setup_build.ps1
 ```
 
-詳細とオプションは [docs/dependencies.md](docs/dependencies.md) を参照してください。
+`shakoc` の場所は `HAKO_CORE_INC_PATH` / `HAKO_CORE_LIB_PATH` / `HAKO_CORE_DLL_PATH`（いずれもフォルダ）→ `%APPDATA%\hakoCore-win` → リポジトリ内の順で探します（[docs/dependencies.md](docs/dependencies.md)）。
+ローバ用のローカル SDK に合わせる作業はこれからです。
 
-## 外部依存
+## 月面の場面
 
-このリポジトリには、以下の外部コンポーネント本体およびネイティブバイナリは含めていません。
+場面は生成物で、元データは [hakoniwa-mujoco-rover](https://github.com/hako-community/hakoniwa-mujoco-rover) の地形タイル（`grid.json`・16bit 高さ画像）・位置暦（`sun.json`）・ローバの GLB です（隣のフォルダに置く）。
 
-- `shakoc`（共有メモリ連携）
-- `hakodrone`（`hakodrone.dll` ＋ `mujoco.dll`・ローカル RC）と機体の定義 `SimModels/courses_drone`
-
-`HakoniwaPdu` プラグインのソースは本リポジトリに含まれます。`shakoc` はネイティブライブラリとして別途インストールが必要です。
-`hakodrone` は `native.lock.json` の版を `scripts/windows/fetch_native.ps1`（`setup_build.ps1` から呼ばれる）が [releases-channel](https://github.com/hako-community/releases-channel) から取得し、`ThirdParty/HakoDrone/Win64` と `SimModels/courses_drone` に置きます（git には入れません）。
-
-環境変数、標準インストール先、フォールバック配置の詳細は [docs/dependencies.md](docs/dependencies.md) を参照してください。依存物の取得元、ビルド方法、バージョン固定方法は今後のビルド手順で整理します。
-
-## 対応モード
-
-- WebSocket 連携: `AHakoniwaWebClient` と `BP_HakoniwaWebClient` が PDU 通信を管理します。
-- 共有メモリ連携: `AHakoniwaShmClient` と `BP_HakoniwaShmClient` が箱庭コアとの同期を管理します。
-- ローカル RC（オフライン）: `Plugins/HakoniwaDroneService` が `hakodrone`（内蔵 FC ＋ MuJoCo の物理）を Unreal の中で動かし、`UDroneServiceVisualizerComponent` が機体状態と表示を連携します。箱庭に繋がずに Unreal 単体で飛ばせます。
-
-## 利用可能な Level
-
-- `AvatarWeb.umap`  — ドローンを Web 経由で制御する際に使用するレベルです。
-- `AvatarWeb-2.umap`  — Web 経由の 2 機体構成向けレベルです。
-- `AvatarShm.umap`  — 共有メモリ経由で箱庭コアと連携するレベルです。
-- `AvatarLocal.umap`  — 箱庭に繋がず、`hakodrone` で Unreal の中だけで飛ばすレベルです（操作は下の「オフラインの操作」）。
-
-## オフラインの操作（AvatarLocal）
-
-PIE を始めたらビューポートを一度クリックします。START ボタンは箱庭（共有メモリ）用なので、オフラインでは押しません。
-
-| 操作 | ゲームパッド | キーボード |
-|---|---|---|
-| アーム | 両スティックを内側下へ（左は右下・右は左下）1 秒 | Space（押すたびにアーム／ディスアーム） |
-| 上昇・下降 | 左スティック 上下 | W / S |
-| ヨー | 左スティック 左右 | A / D |
-| 前進・後退 | 右スティック 上下 | ↑ / ↓ |
-| 左右 | 右スティック 左右 | ← / → |
-
-* Xbox 型（XInput）のゲームパッドはそのまま使えます。
-* それ以外の HID ゲームパッドは **GameInput** で読みます。Windows に Microsoft GameInput の再頒布が必要です（管理者の PowerShell で `winget install --id Microsoft.GameInput -e`）。
-  割り当ては `Config/DefaultInput.ini` の `[/Script/GameInputBase.GameInputDeveloperSettings]` に機種（VID/PID）ごとに書きます。いまは HORIPAD mini4（PS4 互換）を登録しています。
-* エディタが前面にいないあいだは入力を中立にします（GameInput は背景では全軸 0 を送るため）。
-
-## オンラインの操作（AvatarShm・2026-10-04〜）
-
-オンラインの機体の物理は [hakoniwa-mujoco-drone](https://github.com/hako-community/hakoniwa-mujoco-drone) の `swarm_app` が計算し、ゲームパッドは同じリポジトリの送信機（`tools/rc_pdu_pub.py`）が読みます。
-
-```bash
-# Git Bash で（<work_git> は各リポジトリを並べた親フォルダ）
-cd <work_git>
-source hakoniwa-mujoco-drone/tools/local_sdk/env_windows.bash
-cd hakoniwa-mujoco-drone
-UNREAL=game bash tools/online_plant_run.bash      # エディタなしで AvatarShm を開く
-UNREAL=editor bash tools/online_plant_run.bash    # エディタで開く（PIE は自分で開始）
+```powershell
+pwsh scripts\windows\setup_build.ps1                 # ビルド（Windows PowerShell 5.1 でも可。スクリプトは BOM 付き UTF-8）
+pwsh scripts\windows\rover_scene.ps1 -Build          # /Game/Rover/Levels/LunarSouthPole を作り直す（エディタが自動で開いて閉じる）
+pwsh scripts\windows\rover_scene.ps1 -Shots -Probe   # -game で開き、地形の高さを検査して 4 構図を撮る（Saved\RoverShots\<時刻>\）
+pwsh scripts\windows\rover_scene.ps1 -Open           # エディタで開く（PIE は最初のカメラから見る）
 ```
 
-* 開いたら画面の **START をマウスで**押します。Unreal を閉じるとプラントも止まります。
-* ★ オンラインでは **Unreal はゲームパッドを読みません**（`AHakoniwaShmClient` の `bIgnoreGamepad`・既定 true）。
-  読ませると ○×△□ が画面の START / STOP / RESET を押し、スティックが視点を回してしまいます。
-* 操作（HORIPAD mini4）: アームは両スティックを内側下へ（左は右下・右は左下）1 秒・△ でモード切替（GPS ⇔ ATTI）。
-* 衝突は `DroneCollisionComponent` が法線つきで `impulse` に書き、プラントが跳ね返します（反発係数 `RestitutionCoefficient`・既定 0.5）。
+| 要素 | 中身 |
+|---|---|
+| 地形 | 16bit 高さ画像 → Landscape（442×442 頂点。DEM の外は端の値を延ばす）。**ヨー 90° で置き**、四角形を割る対角線の向きを MuJoCo の HField とそろえる。同じ 500 点で Unreal − MuJoCo は最大 0.003 m |
+| 座標 | 局所（右手系 m・x 前 y 左 z 上）→ Unreal = (100x, −100y, 100z)（`RoverFrame.h`） |
+| 光 | 太陽（平行光・`sun.json` の向き・照度・視直径 0.53°）、地球（50 km 先の球。太陽に照らされて満ち欠けが出る）、地球照（弱い平行光）。空の光・大気・霧は置かない |
+| 写り | 自動露出なし・物理カメラ（ISO 100・1/125 s・f/16）。局所露出は切る（`RoverLunarLook.h`） |
+| ローバ | GLB を 1 メッシュに結合して取り込み、原点に地形の傾きに合わせて置く（静止。関節の同期はこれから） |
+| 撮影 | `ARoverShotDirector`：タグ `RoverShot` のシネカメラを順に撮り、フレーム時間を `shots.json` に書く。`-RoverProbeIn/Out` で地形の高さを測る |
 
-## 主要な Blueprint / コンポーネント
-
-- `BP_HakoniwaAvatar` — ドローン本体を表すブループリント。
-- `BP_HakoniwaWebClient` — WebSocket 通信と PDU 管理を行うブループリント。
-- `BP_HakoniwaShmClient` — 共有メモリ通信と PDU 管理を行うブループリント。
-- `WBP_SimStart` — シミュレーション操作用のウィジェット。
-- `UDroneServiceVisualizerComponent` — ローカル RC の状態取得、入力反映、表示更新を行う C++ コンポーネント。
-- `UDroneControlLocalInput` — ローカル RC 用に Unreal のゲームパッド・キーボードを直接読む C++ コンポーネント。
-
-Blueprint は `Content/Blueprints` フォルダ内に配置されています。
-
-## コンフィグレーション
-
-JSON 形式の実行時設定は `Content/Config` に集約しています。クライアントやコンポーネントの `Config/...` というパス指定は、Unreal の `Content` ディレクトリからの相対パスとして解決されます。
-
-- `Content/Config/webavatar.json`
-- `Content/Config/webavatar-2.json`
-- `Content/Config/drone_config.json`
-- `Content/Config/avatar-drone.json`
-- `Content/Config/sharesim-drone.json`
-
-主な設定ファイルの役割は以下です。
-
-- `webavatar.json` — 1 機体構成の WebSocket/共有メモリ連携向け PDU 定義。
-- `webavatar-2.json` — 2 機体構成の WebSocket/共有メモリ連携向け PDU 定義。
-- `avatar-drone.json` — 基本的なドローン avatar 用 PDU 定義。
-- `sharesim-drone.json` — ShareSim、複数ドローン、共有オブジェクトを含むサンプル PDU 定義。
-- `drone_config.json` — ドローン表示・挙動向けの基本設定。
-
-## コードの概要
-
-本プロジェクトでは `AHakoniwaWebClient` または `AHakoniwaShmClient` が PDU 通信を管理し、`AHakoniwaAvatar` にドローンの位置と回転を反映させます。`UDronePropellerComponent` は各プロペラを回転させ、モーターの回転数を視覚化します。
-
-`Plugins/HakoniwaDroneService` は、`hakodrone` の C の口を実行時に読み込む（.lib をリンクしない）薄い wrapper です。関数名は旧 `hako_service_c` 版と同じ（`FHakoDroneServiceRc`）で、機体は `SimModels/courses_drone` を開きます。現時点では Win64 のみを対象にしています（Android は将来対応）。
+* ★ `ADirectionalLight` は生成時に光へピッチ −46° を入れている。スポーンの回転に足されるので、回転は生成のあとで決める。
+* 手で組むときはエディタのコンソールで `Rover.BuildScene -RoverGrid=<grid.json> -RoverSun=<sun.json> -RoverGlb=<glb>`。
 
 ## ライセンス
 
