@@ -79,7 +79,10 @@ function Set-SdkEnvironmentFromRoot {
 
     $resolvedRoot = (Resolve-Path -LiteralPath $Root).Path
     if ($Sdk -eq 'Core') {
-        $env:HAKO_CORE_INC_PATH = Join-Path $resolvedRoot 'include'
+        # ローバのローカル SDK（hakoniwa-core-pro の install）は include\hakoniwa に hako_capi.h がある
+        $inc = Join-Path $resolvedRoot 'include'
+        if (Test-Path (Join-Path $inc 'hakoniwa\hako_capi.h')) { $inc = Join-Path $inc 'hakoniwa' }
+        $env:HAKO_CORE_INC_PATH = $inc
         $env:HAKO_CORE_LIB_PATH = Join-Path $resolvedRoot 'lib'
         $env:HAKO_CORE_DLL_PATH = Join-Path $resolvedRoot 'bin'
         Write-Step "Core SDK environment set for this process: $resolvedRoot"
@@ -109,6 +112,11 @@ $pduRegistryHeader = Join-Path $projectRoot 'Plugins\HakoniwaPdu\Source\ThirdPar
 Assert-File -Path $pluginDescriptor -Description 'HakoniwaPdu plugin descriptor'
 Assert-File -Path $pduRegistryHeader -Description 'hakoniwa-pdu-registry submodule'
 
+# 既定：環境変数が無ければ、隣の作業ルートのローバ用ローカル SDK（<work>\devai_rover\sdk\windows-msvc-x64\hakoniwa-core）を使う
+if ([string]::IsNullOrWhiteSpace($CoreSdkRoot) -and [string]::IsNullOrWhiteSpace($env:HAKO_CORE_LIB_PATH)) {
+    $roverSdk = Join-Path $projectRoot '..\..\devai_rover\sdk\windows-msvc-x64\hakoniwa-core'
+    if (Test-Path (Join-Path $roverSdk 'bin\shakoc.dll')) { $CoreSdkRoot = $roverSdk }
+}
 Set-SdkEnvironmentFromRoot -Root $CoreSdkRoot -Sdk Core
 
 $defaultCoreRoot = Join-Path $env:APPDATA 'hakoCore-win'

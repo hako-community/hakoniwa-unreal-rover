@@ -26,16 +26,18 @@ FString ResolveShakocDllPath()
         CandidateDirs.Add(EnvDir);
     }
 
-    const FString AppDataDir = FPlatformMisc::GetEnvironmentVariable(TEXT("APPDATA"));
-    if (!AppDataDir.IsEmpty())
-    {
-        CandidateDirs.Add(AppDataDir / TEXT("hakoCore-win/bin"));
-    }
-
+    // ★ 2026-10-18（rover）: ビルド時に使った SDK の DLL を、標準配置（%APPDATA%\hakoCore-win）より先に探す。
+    //   逆の順だと、環境変数を付けずに開いたとき、ビルドに使っていない古い SDK の DLL を読んでしまう（SDK の混在）。
     const FString BuildDir = FString(UTF8_TO_TCHAR(HAKO_CORE_DLL_PATH_FALLBACK));
     if (!BuildDir.IsEmpty())
     {
         CandidateDirs.Add(BuildDir);
+    }
+
+    const FString AppDataDir = FPlatformMisc::GetEnvironmentVariable(TEXT("APPDATA"));
+    if (!AppDataDir.IsEmpty())
+    {
+        CandidateDirs.Add(AppDataDir / TEXT("hakoCore-win/bin"));
     }
 
     CandidateDirs.Add(FPaths::ProjectDir() / TEXT("Binaries/Win64"));
