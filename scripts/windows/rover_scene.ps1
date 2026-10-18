@@ -3,6 +3,8 @@
 #   pwsh scripts\windows\rover_scene.ps1 -Build              # 地形タイル・位置暦・GLB から /Game/Rover/Levels/LunarSouthPole を作り直す
 #   pwsh scripts\windows\rover_scene.ps1 -Shots -Probe       # -game で開き、検査点の高さを測って撮影（Saved\RoverShots\<時刻>\）
 #   pwsh scripts\windows\rover_scene.ps1 -Open               # エディタで場面を開く
+#   pwsh scripts\windows\rover_scene.ps1 -RockProbe          # 岩の検査点（mujoco-rover の tools\check_rocks.py が書く）に真上からレイを当て、
+#                                                            # 物理の楕円体と高さを比べる
 #   pwsh scripts\windows\rover_scene.ps1 -Compare            # 参照カメラ（mujoco-rover の bodies\*\generated\ref_cameras.json）ごとに
 #                                                            # 場面を作って撮り、参照の絵と並べる（mujoco-rover の tools\compare_ref_shots.py）
 #
@@ -15,6 +17,7 @@ param(
     [switch]$Probe,
     [switch]$Open,
     [switch]$Compare,
+    [switch]$RockProbe,
     [string]$Tile = 'lola_site01_t01',
     [string]$MujocoRover,
     [string]$Glb,
@@ -78,6 +81,18 @@ if ($Shots -or $Probe) {
         if ($LASTEXITCODE -ne 0) { throw '地形の高さの検査が不合格です' }
     }
     Write-Host "[rover_scene] 出力: $out"
+}
+
+if ($RockProbe) {
+    $points = Join-Path $MujocoRover "models\worlds\$Tile.rock_points.csv"
+    if (-not (Test-Path $points)) { throw "岩の検査点がありません（先に mujoco-rover で tools\check_rocks.py を流す）: $points" }
+    $out = Join-Path $root "Saved\RoverShots\$($stamp)_rocks"
+    New-Item -ItemType Directory -Force $out | Out-Null
+    Invoke-Editor @($uproject, $map, '-game', '-windowed', "-ResX=$ResX", "-ResY=$ResY", '-nosplash', '-unattended',
+        "-RoverProbeIn=$points", "-RoverProbeOut=$out\unreal_rock_heights.csv", '-RoverProbeRocks') (Join-Path $out 'game.log')
+    $py = Join-Path $MujocoRover 'deps\py\Scripts\python.exe'
+    & $py -I (Join-Path $MujocoRover 'tools\check_rocks.py') (Join-Path $MujocoRover "models\worlds\$Tile.xml") --unreal "$out\unreal_rock_heights.csv"
+    if ($LASTEXITCODE -ne 0) { throw '岩の高さの検査が不合格です' }
 }
 
 if ($Compare) {

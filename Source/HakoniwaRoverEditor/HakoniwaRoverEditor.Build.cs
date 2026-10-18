@@ -12,6 +12,7 @@ public class HakoniwaRoverEditor : ModuleRules
 			"Core", "CoreUObject", "Engine", "UnrealEd", "AssetRegistry",
 			"Landscape", "Json", "ImageWrapper", "MaterialEditor", "CinematicCamera",
 			"InterchangeCore", "InterchangeEngine", "InterchangePipelines",
+			"MeshDescription", "StaticMeshDescription", "PhysicsCore",
 			"HakoniwaRover",
 		});
 	}

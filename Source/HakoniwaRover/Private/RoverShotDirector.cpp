@@ -4,6 +4,7 @@
 
 #include "CineCameraActor.h"
 #include "Components/DirectionalLightComponent.h"
+#include "Components/InstancedStaticMeshComponent.h"
 #include "Engine/DirectionalLight.h"
 #include "Dom/JsonObject.h"
 #include "Engine/World.h"
@@ -47,6 +48,22 @@ void ARoverShotDirector::BeginPlay()
 	FParse::Value(Cmd, TEXT("-RoverProbeIn="), ProbeIn);
 	FParse::Value(Cmd, TEXT("-RoverProbeOut="), ProbeOut);
 	bProbeDone = ProbeIn.IsEmpty();
+	// 岩の検査：場面の岩（HISM）は当たり判定を切って保存してあるので、ここで入れる（数フレーム後に RunProbe が当てる）
+	if (FParse::Param(Cmd, TEXT("RoverProbeRocks")))
+	{
+		int32 N = 0;
+		for (TActorIterator<AActor> It(GetWorld()); It; ++It)
+		{
+			TArray<UInstancedStaticMeshComponent*> Comps;
+			It->GetComponents(Comps);
+			for (UInstancedStaticMeshComponent* C : Comps)
+			{
+				C->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+				N += C->GetInstanceCount();
+			}
+		}
+		UE_LOG(LogRoverShot, Log, TEXT("probe: rock collision on (%d instances)"), N);
+	}
 
 	APlayerController* PC = UGameplayStatics::GetPlayerController(this, 0);
 	if (PC && Cameras.Num() > 0)
@@ -75,7 +92,9 @@ void ARoverShotDirector::RunProbe()
 	TArray<FString> Lines;
 	Text.ParseIntoArrayLines(Lines);
 	TArray<FString> Out = { TEXT("x,y,z") };
-	int32 Missed = 0;
+	int32 Missed = 0, OnRock = 0;
+	// -RoverProbeRocks：岩（場面の生成で HISM に並べたもの）への当たりも採用する（岩の検査。地形の検査では外す）
+	const bool bRocks = FParse::Param(FCommandLine::Get(), TEXT("RoverProbeRocks"));
 	for (int32 i = 1; i < Lines.Num(); ++i)
 	{
 		TArray<FString> Cols;
@@ -98,9 +117,11 @@ void ARoverShotDirector::RunProbe()
 			{
 				break;
 			}
-			if (Hit.GetActor() && Hit.GetActor()->IsA<ALandscapeProxy>())
+			const bool bRock = bRocks && Hit.GetComponent() && Hit.GetComponent()->IsA<UInstancedStaticMeshComponent>();
+			if ((Hit.GetActor() && Hit.GetActor()->IsA<ALandscapeProxy>()) || bRock)
 			{
 				Z = FString::Printf(TEXT("%.4f"), RoverFrame::UnrealToLocal(Hit.ImpactPoint).Z);
+				OnRock += bRock ? 1 : 0;
 				break;
 			}
 			Params.AddIgnoredActor(Hit.GetActor());
@@ -109,7 +130,7 @@ void ARoverShotDirector::RunProbe()
 		Out.Add(FString::Printf(TEXT("%s,%s,%s"), *Cols[0].TrimStartAndEnd(), *Cols[1].TrimStartAndEnd(), *Z));
 	}
 	FFileHelper::SaveStringArrayToFile(Out, *ProbeOut);
-	UE_LOG(LogRoverShot, Log, TEXT("probe: %d points -> %s (missed %d)"), Out.Num() - 1, *ProbeOut, Missed);
+	UE_LOG(LogRoverShot, Log, TEXT("probe: %d points -> %s (missed %d, on rocks %d)"), Out.Num() - 1, *ProbeOut, Missed, OnRock);
 }
 
 void ARoverShotDirector::Tick(float DeltaSeconds)

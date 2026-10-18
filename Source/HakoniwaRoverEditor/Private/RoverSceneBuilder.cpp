@@ -6,6 +6,8 @@
 #include "CineCameraActor.h"
 #include "CineCameraComponent.h"
 #include "Components/DirectionalLightComponent.h"
+#include "Components/HierarchicalInstancedStaticMeshComponent.h"
+#include "Engine/CollisionProfile.h"
 #include "Components/StaticMeshComponent.h"
 #include "Dom/JsonObject.h"
 #include "Editor.h"
@@ -36,10 +38,12 @@
 #include "Materials/MaterialExpressionVertexNormalWS.h"
 #include "Materials/MaterialExpressionWorldPosition.h"
 #include "Materials/MaterialParameterCollection.h"
+#include "MeshDescription.h"
 #include "Misc/FileHelper.h"
 #include "Misc/PackageName.h"
 #include "Misc/Paths.h"
 #include "Modules/ModuleManager.h"
+#include "PhysicsEngine/BodySetup.h"
 #include "RoverFrame.h"
 #include "RoverAvatar.h"
 #include "RoverLunarLook.h"
@@ -47,6 +51,7 @@
 #include "RoverViewGameMode.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
+#include "StaticMeshAttributes.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogRoverScene, Log, All);
 
@@ -57,6 +62,7 @@ namespace
 	const TCHAR* MaterialDir = TEXT("/Game/Rover/Materials");
 	// ★ ローバのメッシュは git に入れない（.gitignore）。各自の PC で GLB から作る
 	const TCHAR* VehicleDir = TEXT("/Game/Rover/Vehicles");
+	const TCHAR* RockDir = TEXT("/Game/Rover/Terrain/Rocks");
 
 	TSharedPtr<FJsonObject> LoadJson(const FString& Path)
 	{
@@ -268,6 +274,7 @@ return normalize(float3(-gr.x, -gr.y, 1.0));
 		auto* Sp = Cast<UMaterialExpressionConstant>(UMaterialEditingLibrary::CreateMaterialExpression(M, UMaterialExpressionConstant::StaticClass(), -400, 600));
 		Sp->R = 0.0f;
 		UMaterialEditingLibrary::ConnectMaterialProperty(Sp, TEXT(""), MP_Specular);
+		M->bUsedWithInstancedStaticMeshes = true;   // 岩（HISM）にも使う
 		const TArray<FString> Errors = UMaterialEditingLibrary::RecompileMaterial(M);
 		for (const FString& E : Errors)
 		{
@@ -401,6 +408,128 @@ return normalize(float3(-gr.x, -gr.y, 1.0));
 		// 確認：車体の外形の中心は後ろ寄り（体の座標で x < 0）・下端は GLB の原点（地面）
 		UE_LOG(LogRoverScene, Log, TEXT("rover avatar: %d parts, %d corners, body box (actor frame) min=%s max=%s  robot=%s base ch%d joints ch%d"),
 			Placed, A->Corners.Num(), *BodyBox.Min.ToString(), *BodyBox.Max.ToString(), *A->RobotName, A->BaseChannel, A->JointChannel);
+		return A;
+	}
+
+	/** 岩のメッシュ 1 つ（配置表の meshes の 1 つ。体の座標の単位球の内側）をスタティックメッシュのアセットにする。
+	 *  頂点は Unreal の局所座標（y を反転）。大きさ（楕円体の半径）はインスタンスの拡大で付ける */
+	UStaticMesh* MakeRockMesh(const FString& Name, const TSharedPtr<FJsonObject>& Src, UMaterialInterface* Mat)
+	{
+		const FString PackagePath = FString(RockDir) / Name;
+		UPackage* Pkg = CreatePackage(*PackagePath);
+		UStaticMesh* SM = NewObject<UStaticMesh>(Pkg, *Name, RF_Public | RF_Standalone | RF_Transactional);
+		FAssetRegistryModule::AssetCreated(SM);
+
+		const TArray<TSharedPtr<FJsonValue>>& V = Src->GetArrayField(TEXT("vertices"));
+		const TArray<TSharedPtr<FJsonValue>>& T = Src->GetArrayField(TEXT("triangles"));
+		FMeshDescription MD;
+		FStaticMeshAttributes Attr(MD);
+		Attr.Register();
+		TArray<FVertexID> Ids;
+		for (int32 i = 0; i + 2 < V.Num(); i += 3)
+		{
+			const FVertexID Id = MD.CreateVertex();
+			Attr.GetVertexPositions()[Id] = FVector3f(V[i]->AsNumber(), -V[i + 1]->AsNumber(), V[i + 2]->AsNumber());
+			Ids.Add(Id);
+		}
+		const FPolygonGroupID Group = MD.CreatePolygonGroup();
+		Attr.GetPolygonGroupMaterialSlotNames()[Group] = TEXT("Rock");
+		for (int32 k = 0; k + 2 < T.Num(); k += 3)
+		{
+			FVertexID Tri[3] = { Ids[(int32)T[k]->AsNumber()], Ids[(int32)T[k + 1]->AsNumber()], Ids[(int32)T[k + 2]->AsNumber()] };
+			const FVector3f P0 = Attr.GetVertexPositions()[Tri[0]], P1 = Attr.GetVertexPositions()[Tri[1]], P2 = Attr.GetVertexPositions()[Tri[2]];
+			// Unreal（左手系）は外から見て時計回りが表。右手系の外積で外向きになる並びなら入れ替える
+			if (FVector3f::DotProduct(FVector3f::CrossProduct(P1 - P0, P2 - P0), P0) > 0.0f)
+			{
+				Swap(Tri[1], Tri[2]);
+			}
+			TArray<FVertexInstanceID> Inst;
+			for (const FVertexID& Vid : Tri)
+			{
+				Inst.Add(MD.CreateVertexInstance(Vid));
+			}
+			MD.CreatePolygon(Group, Inst);
+		}
+		SM->GetStaticMaterials().Add(FStaticMaterial(Mat, TEXT("Rock")));
+		// ★ 当たり判定の三角形は描画用の頂点の並びから作るので、CPU から読めるようにしておく
+		//   （BuildFromMeshDescriptions の既定では読めず、三角形が空になってレイが岩を素通りした）
+		SM->bAllowCPUAccess = true;
+		FMeshSectionInfo Section;
+		Section.MaterialIndex = 0;
+		Section.bEnableCollision = true;
+		SM->GetSectionInfoMap().Set(0, 0, Section);
+		UStaticMesh::FBuildMeshDescriptionsParams P;
+		P.bAllowCpuAccess = true;
+		P.bBuildSimpleCollision = false;
+		P.bFastBuild = false;
+		SM->BuildFromMeshDescriptions({ &MD }, P);
+		SM->CreateBodySetup();
+		SM->GetBodySetup()->CollisionTraceFlag = CTF_UseComplexAsSimple;   // 検査のレイが絵と同じ形に当たる
+		// ★ 当たり判定（三角形）を作り直す。これが無いと保存した岩にレイが当たらなかった（地面まで抜けた）
+		SM->GetBodySetup()->InvalidatePhysicsData();
+		SM->GetBodySetup()->CreatePhysicsMeshes();
+		SM->PostEditChange();
+		SM->MarkPackageDirty();
+		return SM;
+	}
+
+	/** 岩（hakoniwa-mujoco-rover の tools/rock_field.py の配置表）。物理は車両の近くだけ持つが、絵は全部描く。
+	 *  メッシュの種類ごとに HISM 1 つ。インスタンス = 楕円体（体の座標の回転・半径）を Unreal へ */
+	AActor* BuildRocks(UWorld* World, const FString& RocksJson, UMaterialInterface* Mat, FVector4* OutBigRock)
+	{
+		const TSharedPtr<FJsonObject> Doc = LoadJson(RocksJson);
+		if (!Doc)
+		{
+			return nullptr;
+		}
+		const TArray<TSharedPtr<FJsonValue>>& Meshes = Doc->GetArrayField(TEXT("meshes"));
+		AActor* A = World->SpawnActor<AActor>();
+		A->SetActorLabel(TEXT("Rocks"));
+		USceneComponent* Root = NewObject<USceneComponent>(A, TEXT("Root"), RF_Transactional);
+		A->SetRootComponent(Root);
+		A->AddInstanceComponent(Root);
+		Root->RegisterComponent();
+		TArray<UHierarchicalInstancedStaticMeshComponent*> Comps;
+		for (int32 i = 0; i < Meshes.Num(); ++i)
+		{
+			UStaticMesh* SM = MakeRockMesh(FString::Printf(TEXT("SM_Rock_%d"), i), Meshes[i]->AsObject(), Mat);
+			UHierarchicalInstancedStaticMeshComponent* C = NewObject<UHierarchicalInstancedStaticMeshComponent>(A, *FString::Printf(TEXT("Rocks_%d"), i), RF_Transactional);
+			C->SetStaticMesh(SM);
+			// ★ NewObject の既定は BlockAllDynamic（WorldDynamic）で、地形を見るレイ（WorldStatic）が岩を素通りした。岩は地形の一部
+			C->SetCollisionProfileName(UCollisionProfile::BlockAll_ProfileName);
+			// ★ 当たり判定は既定で切る。2.8 万個ぶんの体を開くときに作ると CPU が混み、箱庭の PLANT が実時間を割った
+			//   （起動のあたりで遅れて 0.91〜0.97）。岩の検査（-RoverProbeRocks）のときだけ ARoverShotDirector が入れる
+			C->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+			// 400 m より遠くは描かない（20 cm の岩は 1 画素未満）
+			C->SetCullDistances(0, 40000);
+			C->SetupAttachment(Root);
+			A->AddInstanceComponent(C);
+			C->RegisterComponent();
+			Comps.Add(C);
+		}
+		int32 N = 0;
+		for (const TSharedPtr<FJsonValue>& V : Doc->GetArrayField(TEXT("rocks")))
+		{
+			const TArray<TSharedPtr<FJsonValue>>& R = V->AsArray();
+			const double W = R[6]->AsNumber(), X = R[7]->AsNumber(), Y = R[8]->AsNumber(), Z = R[9]->AsNumber();
+			FMatrix M = FMatrix::Identity;   // 体 → 世界（右手系・R[行][列]）
+			M.M[0][0] = 1 - 2 * (Y * Y + Z * Z); M.M[0][1] = 2 * (X * Y - W * Z);     M.M[0][2] = 2 * (X * Z + W * Y);
+			M.M[1][0] = 2 * (X * Y + W * Z);     M.M[1][1] = 1 - 2 * (X * X + Z * Z); M.M[1][2] = 2 * (Y * Z - W * X);
+			M.M[2][0] = 2 * (X * Z - W * Y);     M.M[2][1] = 2 * (Y * Z + W * X);     M.M[2][2] = 1 - 2 * (X * X + Y * Y);
+			const FTransform Xf(ARoverAvatar::FluRotationToUnreal(M),
+				RoverFrame::LocalToUnreal(R[0]->AsNumber(), R[1]->AsNumber(), R[2]->AsNumber()),
+				FVector(R[3]->AsNumber(), R[4]->AsNumber(), R[5]->AsNumber()) * 100.0);
+			const int32 Var = FMath::Clamp((int32)R[10]->AsNumber(), 0, Comps.Num() - 1);
+			Comps[Var]->AddInstance(Xf, /*bWorldSpace*/ true);
+			++N;
+			// 確認用：原点から 150 m 以内で一番背の高い岩（局所座標の中心と c）
+			const double Cx = R[0]->AsNumber(), Cy = R[1]->AsNumber(), Cc = R[5]->AsNumber();
+			if (OutBigRock && FMath::Sqrt(Cx * Cx + Cy * Cy) < 150.0 && Cc > OutBigRock->W)
+			{
+				*OutBigRock = FVector4(Cx, Cy, R[2]->AsNumber(), Cc);
+			}
+		}
+		UE_LOG(LogRoverScene, Log, TEXT("rocks: %d instances in %d meshes from %s"), N, Comps.Num(), *FPaths::GetCleanFilename(RocksJson));
 		return A;
 	}
 
@@ -539,6 +668,14 @@ namespace RoverSceneBuilder
 		}
 		UE_LOG(LogRoverScene, Log, TEXT("landscape %dx%d (%d comps)  loc=%s scale=%s"), Size, Size, Comps * Comps, *LandLoc.ToString(), *LandScale.ToString());
 
+		// --- 岩：地形タイルと同じフォルダの <tile>.rocks.json（あれば） ---
+		const FString RocksJson = Args.Grid.Replace(TEXT(".grid.json"), TEXT(".rocks.json"));
+		FVector4 BigRock(0.0, 0.0, 0.0, 0.0);
+		if (FPaths::FileExists(RocksJson))
+		{
+			BuildRocks(World, RocksJson, Regolith, &BigRock);
+		}
+
 		// --- 光：太陽・地球・地球照 ---
 		ADirectionalLight* SunL = AddDirectionalLight(World, TEXT("Sun"), SunUe, SunO->GetNumberField(TEXT("illuminance_lux")), SunO->GetNumberField(TEXT("angular_diameter_deg")));
 		// 半透明・霧などに使う主の平行光源は太陽（決めないと 2 つが競合するという警告が画面に出る）
@@ -668,6 +805,14 @@ namespace RoverSceneBuilder
 			// 04：上空から斜めに（地形の起伏と影の伸び）
 			const FVector2D P = Rot(S2, 90.0) * 400.0;
 			AddShot(World, TEXT("Shot_04_Overview"), At(P, 150.0), RoverPos, 35.0f);
+		}
+		if (BigRock.W > 0.0)
+		{
+			// 05：岩の確認（原点から 150 m 以内で一番背の高い岩を、太陽の側から斜めに 3 m で）
+			const FVector2D C2(BigRock.X, BigRock.Y);
+			const FVector2D P = C2 + Rot(S2, 40.0) * 3.0;
+			AddShot(World, TEXT("Shot_05_Rock"), At(P, 0.8), RoverFrame::LocalToUnreal(BigRock.X, BigRock.Y, BigRock.Z), 35.0f);
+			UE_LOG(LogRoverScene, Log, TEXT("rock shot: rock at (%.2f, %.2f) c=%.2f m"), BigRock.X, BigRock.Y, BigRock.W);
 		}
 		}
 
