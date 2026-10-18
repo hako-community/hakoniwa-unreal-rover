@@ -473,7 +473,7 @@ return normalize(float3(-gr.x, -gr.y, 1.0));
 		return SM;
 	}
 
-	/** 岩（hakoniwa-mujoco-rover の tools/rock_field.py の配置表）。物理は車両の近くだけ持つが、絵は全部描く。
+	/** 岩（hakoniwa-simenv-data の src/lunar_terrain/rock_field.py の配置表）。物理は車両の近くだけ持つが、絵は全部描く。
 	 *  メッシュの種類ごとに HISM 1 つ。インスタンス = 楕円体（体の座標の回転・半径）を Unreal へ */
 	AActor* BuildRocks(UWorld* World, const FString& RocksJson, UMaterialInterface* Mat, FVector4* OutBigRock)
 	{

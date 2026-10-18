@@ -8,7 +8,8 @@
 #   pwsh scripts\windows\rover_scene.ps1 -Compare            # 参照カメラ（mujoco-rover の bodies\*\generated\ref_cameras.json）ごとに
 #                                                            # 場面を作って撮り、参照の絵と並べる（mujoco-rover の tools\compare_ref_shots.py）
 #
-# 地形と位置暦は hakoniwa-mujoco-rover が作る（tools/dem_tile.py・tools/sun_ephem.py。D13 で simenv-data へ移す予定）。
+# 地形・位置暦・岩は hakoniwa-simenv-data が作る（src/lunar_terrain）。mujoco-rover の submodule の場所を、
+# 世界の MJCF（mujoco-rover の tools/make_world.py の生成物）から引く。
 # 先に scripts\windows\setup_build.ps1 でビルドしておく。
 [CmdletBinding()]
 param(
@@ -32,7 +33,13 @@ $root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $uproject = Join-Path $root 'HakoniwaRover.uproject'
 if (-not $MujocoRover) { $MujocoRover = Join-Path $root '..\hakoniwa-mujoco-rover' }
 $MujocoRover = (Resolve-Path $MujocoRover).Path
-$tileDir = Join-Path $MujocoRover "models\worlds\$Tile"
+# 地形タイル（hakoniwa-simenv-data）の場所は世界の MJCF の <custom><text name="rover_tile"> から（mujoco-rover の tools/make_world.py）
+$worldXml = Join-Path $MujocoRover "models\worlds\$Tile.xml"
+if (-not (Test-Path $worldXml)) { throw "世界の MJCF がありません（mujoco-rover で tools\make_world.py $Tile）: $worldXml" }
+$tileRel = ([xml](Get-Content -LiteralPath $worldXml -Raw -Encoding UTF8)).mujoco.custom.text |
+    Where-Object { $_.name -eq 'rover_tile' } | ForEach-Object { $_.data }
+if (-not $tileRel) { throw "世界の MJCF に rover_tile がありません: $worldXml" }
+$tileDir = (Resolve-Path (Join-Path (Split-Path $worldXml) $tileRel)).Path
 $grid = Join-Path $tileDir "$Tile.grid.json"
 $sun = Join-Path $tileDir "$Tile.sun.json"
 # ローバの GLB：-Glb で指定。無ければ mujoco-rover の bodies\<名前>\source\ にある 1 つを使う
