@@ -29,6 +29,13 @@
 #include "Materials/Material.h"
 #include "Materials/MaterialExpressionConstant.h"
 #include "Materials/MaterialExpressionConstant3Vector.h"
+#include "Materials/MaterialExpressionCameraVectorWS.h"
+#include "Materials/MaterialExpressionCollectionParameter.h"
+#include "Materials/MaterialExpressionCustom.h"
+#include "Materials/MaterialExpressionPixelDepth.h"
+#include "Materials/MaterialExpressionVertexNormalWS.h"
+#include "Materials/MaterialExpressionWorldPosition.h"
+#include "Materials/MaterialParameterCollection.h"
 #include "Misc/FileHelper.h"
 #include "Misc/PackageName.h"
 #include "Misc/Paths.h"
@@ -122,6 +129,149 @@ namespace
 		S->R = Specular;
 		UMaterialEditingLibrary::ConnectMaterialProperty(S, TEXT(""), MP_Specular);
 		UMaterialEditingLibrary::RecompileMaterial(M);
+		M->MarkPackageDirty();
+		return M;
+	}
+
+	// Hapke（1981）の双方向反射率を、標準の拡散（BaseColor/π·E·μ0）の BaseColor に直したもの：
+	//   r = w/(4π)·μ0/(μ0+μ)·[(1+B(g))·P(g) + H(μ0)·H(μ) − 1] → BaseColor = π·r/μ0 = w/4/(μ0+μ)·[…]
+	//   B(g) = B0/(1+tan(g/2)/h)（衝効果）、P(g) は 2 項 HG（b・c）、H(x) = (1+2x)/(1+2xγ)・γ = √(1−w)
+	//   定数は検討書 §3.7（南極域＝高地：w 0.32・B0 1.0・h 0.06・b 0.21・c 0.70）。μ0・μ・g は面の法線（頂点）・視線・太陽で決める。
+	//   明るさのむら（±15%）を 2 つの大きさの値ノイズで掛ける。μ0 は標準の拡散が掛けるので、ここでは割った形にしてある
+	const TCHAR* HapkeHlsl = TEXT(R"(
+float3 n = normalize(N); float3 v = normalize(V); float3 s = normalize(S.xyz);
+float mu0 = max(dot(n, s), 1e-3); float mu = max(dot(n, v), 1e-3);
+float cg = clamp(dot(s, v), -1.0, 1.0); float g = acos(cg);
+const float w = 0.32, B0 = 1.0, hh = 0.06, b = 0.21, c = 0.70;
+float B = B0 / (1.0 + tan(min(g, 3.1) * 0.5) / hh);
+float b2 = b * b;
+float P = 0.5 * (1.0 + c) * (1.0 - b2) / pow(1.0 - 2.0 * b * cg + b2, 1.5)
+        + 0.5 * (1.0 - c) * (1.0 - b2) / pow(1.0 + 2.0 * b * cg + b2, 1.5);
+float gam = sqrt(1.0 - w);
+float H0 = (1.0 + 2.0 * mu0) / (1.0 + 2.0 * mu0 * gam);
+float H1 = (1.0 + 2.0 * mu) / (1.0 + 2.0 * mu * gam);
+float bc = w * 0.25 / (mu0 + mu) * ((1.0 + B) * P + H0 * H1 - 1.0);
+float tint = 1.0;
+for (int o = 0; o < 2; o++) {
+  float sc = (o == 0) ? 4000.0 : 300.0;
+  float2 x = Pos.xy / sc; float2 i = floor(x); float2 f = x - i; float2 u = f * f * (3.0 - 2.0 * f);
+  float a0 = frac(sin(dot(fmod(i, 1024.0), float2(127.1, 311.7))) * 43758.5453);
+  float a1 = frac(sin(dot(fmod(i + float2(1, 0), 1024.0), float2(127.1, 311.7))) * 43758.5453);
+  float a2 = frac(sin(dot(fmod(i + float2(0, 1), 1024.0), float2(127.1, 311.7))) * 43758.5453);
+  float a3 = frac(sin(dot(fmod(i + float2(1, 1), 1024.0), float2(127.1, 311.7))) * 43758.5453);
+  float nv = lerp(lerp(a0, a1, u.x), lerp(a2, a3, u.x), u.y);
+  tint *= 1.0 + 0.15 * (nv - 0.5) * ((o == 0) ? 1.2 : 0.8);
+}
+return saturate(bc * tint).xxx;
+)");
+
+	// 地面の細かい凹凸（DEM の 5 m 格子より小さいもの）：5 段の勾配ノイズ（導関数つき）の傾きで法線を傾ける（接空間 ≒ 世界の XY）。
+	//   大きさ 6〜490 cm・高さ 0.6〜23 cm。段ごとに座標を 36.9° 回して格子の向きをそろえない。
+	//   画面上で細かすぎる段（大きさの 400 倍より遠い）は弱める（遠景のちらつき止め）
+	const TCHAR* DetailNormalHlsl = TEXT(R"(
+float2 gr = float2(0, 0);
+float2 p = Pos.xy;
+float2x2 rot = float2x2(0.8, -0.6, 0.6, 0.8);
+float2x2 acc = float2x2(1, 0, 0, 1);
+for (int o = 0; o < 5; o++) {
+  float sc = 6.0 * pow(3.0, o);
+  float am = 0.6 * pow(2.5, o);
+  float fade = saturate(2.0 - Depth / (sc * 400.0));
+  acc = mul(rot, acc);
+  float2 q = mul(acc, p) / sc;
+  float2 i = floor(q); float2 f = q - i;
+  float2 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+  float2 du = 30.0 * f * f * (f * (f - 2.0) + 1.0);
+  float2 i0 = fmod(i, 1024.0); float2 i1 = fmod(i + float2(1, 0), 1024.0); float2 i2 = fmod(i + float2(0, 1), 1024.0); float2 i3 = fmod(i + float2(1, 1), 1024.0);
+  float2 ga = -1.0 + 2.0 * frac(sin(float2(dot(i0, float2(127.1, 311.7)), dot(i0, float2(269.5, 183.3)))) * 43758.5453);
+  float2 gb = -1.0 + 2.0 * frac(sin(float2(dot(i1, float2(127.1, 311.7)), dot(i1, float2(269.5, 183.3)))) * 43758.5453);
+  float2 gc = -1.0 + 2.0 * frac(sin(float2(dot(i2, float2(127.1, 311.7)), dot(i2, float2(269.5, 183.3)))) * 43758.5453);
+  float2 gd = -1.0 + 2.0 * frac(sin(float2(dot(i3, float2(127.1, 311.7)), dot(i3, float2(269.5, 183.3)))) * 43758.5453);
+  float va = dot(ga, f); float vb = dot(gb, f - float2(1, 0)); float vc = dot(gc, f - float2(0, 1)); float vd = dot(gd, f - float2(1, 1));
+  float k = va - vb - vc + vd;
+  float2 dq = ga + u.x * (gb - ga) + u.y * (gc - ga) + u.x * u.y * (ga - gb - gc + gd) + du * (u.yx * k + float2(vb, vc) - va);
+  gr += fade * am / sc * mul(transpose(acc), dq);
+}
+return normalize(float3(-gr.x, -gr.y, 1.0));
+)");
+
+	UMaterialExpressionCustom* AddCustom(UMaterial* M, const TCHAR* Code, ECustomMaterialOutputType Out, const TArray<TPair<FName, UMaterialExpression*>>& In, int32 Y)
+	{
+		auto* C = Cast<UMaterialExpressionCustom>(UMaterialEditingLibrary::CreateMaterialExpression(M, UMaterialExpressionCustom::StaticClass(), -400, Y));
+		C->Code = Code;
+		C->OutputType = Out;
+		C->Inputs.Reset();
+		for (const TPair<FName, UMaterialExpression*>& P : In)
+		{
+			FCustomInput& I = C->Inputs.AddDefaulted_GetRef();
+			I.InputName = P.Key;
+			I.Input.Connect(0, P.Value);
+		}
+		return C;
+	}
+
+	/** 太陽の向き（世界・天体へ向かう単位ベクトル）を入れるパラメータコレクション。レゴリスのマテリアルが読む */
+	UMaterialParameterCollection* MakeLunarCollection(const FVector& SunUe)
+	{
+		const FString Name = TEXT("MPC_Lunar");
+		const FString PackagePath = FString(MaterialDir) / Name;
+		UMaterialParameterCollection* Mpc = LoadObject<UMaterialParameterCollection>(nullptr, *(PackagePath + TEXT(".") + Name), nullptr, LOAD_NoWarn | LOAD_Quiet);
+		if (!Mpc)
+		{
+			UPackage* Pkg = CreatePackage(*PackagePath);
+			Mpc = NewObject<UMaterialParameterCollection>(Pkg, *Name, RF_Public | RF_Standalone | RF_Transactional);
+			FAssetRegistryModule::AssetCreated(Mpc);
+		}
+		Mpc->VectorParameters.Reset();
+		FCollectionVectorParameter& P = Mpc->VectorParameters.AddDefaulted_GetRef();
+		P.ParameterName = TEXT("SunDir");
+		P.DefaultValue = FLinearColor(SunUe.X, SunUe.Y, SunUe.Z, 0.0f);
+		Mpc->PostEditChange();
+		Mpc->MarkPackageDirty();
+		return Mpc;
+	}
+
+	/** レゴリス：Hapke の反射（BaseColor）＋細かい凹凸（Normal）。鏡面は Hapke に含めるので 0 */
+	UMaterial* MakeRegolithMaterial(UMaterialParameterCollection* Mpc)
+	{
+		const FString Name = TEXT("M_Regolith");
+		const FString PackagePath = FString(MaterialDir) / Name;
+		UMaterial* M = LoadObject<UMaterial>(nullptr, *(PackagePath + TEXT(".") + Name), nullptr, LOAD_NoWarn | LOAD_Quiet);
+		if (M)
+		{
+			UMaterialEditingLibrary::DeleteAllMaterialExpressions(M);
+		}
+		else
+		{
+			UPackage* Pkg = CreatePackage(*PackagePath);
+			M = NewObject<UMaterial>(Pkg, *Name, RF_Public | RF_Standalone | RF_Transactional);
+			FAssetRegistryModule::AssetCreated(M);
+		}
+		auto* N = UMaterialEditingLibrary::CreateMaterialExpression(M, UMaterialExpressionVertexNormalWS::StaticClass(), -800, 0);
+		auto* V = UMaterialEditingLibrary::CreateMaterialExpression(M, UMaterialExpressionCameraVectorWS::StaticClass(), -800, 100);
+		auto* Pos = UMaterialEditingLibrary::CreateMaterialExpression(M, UMaterialExpressionWorldPosition::StaticClass(), -800, 300);
+		auto* S = Cast<UMaterialExpressionCollectionParameter>(UMaterialEditingLibrary::CreateMaterialExpression(M, UMaterialExpressionCollectionParameter::StaticClass(), -800, 200));
+		S->Collection = Mpc;
+		S->ParameterName = TEXT("SunDir");
+		S->ParameterId = Mpc->GetParameterId(S->ParameterName);
+		UMaterialExpressionCustom* Hapke = AddCustom(M, HapkeHlsl, CMOT_Float3, { {TEXT("N"), N}, {TEXT("V"), V}, {TEXT("S"), S}, {TEXT("Pos"), Pos} }, 0);
+		Hapke->Description = TEXT("Hapke");
+		UMaterialEditingLibrary::ConnectMaterialProperty(Hapke, TEXT(""), MP_BaseColor);
+		auto* Depth = UMaterialEditingLibrary::CreateMaterialExpression(M, UMaterialExpressionPixelDepth::StaticClass(), -800, 400);
+		UMaterialExpressionCustom* Bump = AddCustom(M, DetailNormalHlsl, CMOT_Float3, { {TEXT("Pos"), Pos}, {TEXT("Depth"), Depth} }, 300);
+		Bump->Description = TEXT("DetailNormal");
+		UMaterialEditingLibrary::ConnectMaterialProperty(Bump, TEXT(""), MP_Normal);
+		auto* R = Cast<UMaterialExpressionConstant>(UMaterialEditingLibrary::CreateMaterialExpression(M, UMaterialExpressionConstant::StaticClass(), -400, 500));
+		R->R = 1.0f;
+		UMaterialEditingLibrary::ConnectMaterialProperty(R, TEXT(""), MP_Roughness);
+		auto* Sp = Cast<UMaterialExpressionConstant>(UMaterialEditingLibrary::CreateMaterialExpression(M, UMaterialExpressionConstant::StaticClass(), -400, 600));
+		Sp->R = 0.0f;
+		UMaterialEditingLibrary::ConnectMaterialProperty(Sp, TEXT(""), MP_Specular);
+		const TArray<FString> Errors = UMaterialEditingLibrary::RecompileMaterial(M);
+		for (const FString& E : Errors)
+		{
+			UE_LOG(LogRoverScene, Error, TEXT("M_Regolith: %s"), *E);
+		}
 		M->MarkPackageDirty();
 		return M;
 	}
@@ -272,7 +422,15 @@ namespace RoverSceneBuilder
 		}
 		World->GetWorldSettings()->DefaultGameMode = ARoverViewGameMode::StaticClass();
 
-		UMaterial* Regolith = MakeLitMaterial(TEXT("M_Regolith"), FLinearColor(0.12f, 0.12f, 0.12f), 1.0f, 0.3f);
+		// 太陽・地球の向き（局所座標 → Unreal）。レゴリスのマテリアルも太陽の向きを使う
+		const TSharedPtr<FJsonObject> SunO = Sun->GetObjectField(TEXT("sun"));
+		const TSharedPtr<FJsonObject> EarthO = Sun->GetObjectField(TEXT("earth"));
+		const FVector Sd = JsonVec3(SunO, TEXT("dir_local"));
+		const FVector Ed = JsonVec3(EarthO, TEXT("dir_local"));
+		const FVector SunUe = RoverFrame::LocalDirToUnreal(Sd.X, Sd.Y, Sd.Z);
+		const FVector EarthUe = RoverFrame::LocalDirToUnreal(Ed.X, Ed.Y, Ed.Z);
+
+		UMaterial* Regolith = MakeRegolithMaterial(MakeLunarCollection(SunUe));
 		UMaterial* EarthMat = MakeLitMaterial(TEXT("M_Earth"), FLinearColor(0.22f, 0.30f, 0.45f), 0.6f, 0.5f);
 
 		// 頂点 (0, 0) = 局所 (+half, +half) = Unreal (+half, −half)
@@ -295,13 +453,7 @@ namespace RoverSceneBuilder
 		}
 		UE_LOG(LogRoverScene, Log, TEXT("landscape %dx%d (%d comps)  loc=%s scale=%s"), Size, Size, Comps * Comps, *LandLoc.ToString(), *LandScale.ToString());
 
-		// --- 光：太陽・地球・地球照（向きは局所座標 → Unreal） ---
-		const TSharedPtr<FJsonObject> SunO = Sun->GetObjectField(TEXT("sun"));
-		const TSharedPtr<FJsonObject> EarthO = Sun->GetObjectField(TEXT("earth"));
-		const FVector Sd = JsonVec3(SunO, TEXT("dir_local"));
-		const FVector Ed = JsonVec3(EarthO, TEXT("dir_local"));
-		const FVector SunUe = RoverFrame::LocalDirToUnreal(Sd.X, Sd.Y, Sd.Z);
-		const FVector EarthUe = RoverFrame::LocalDirToUnreal(Ed.X, Ed.Y, Ed.Z);
+		// --- 光：太陽・地球・地球照 ---
 		AddDirectionalLight(World, TEXT("Sun"), SunUe, SunO->GetNumberField(TEXT("illuminance_lux")), SunO->GetNumberField(TEXT("angular_diameter_deg")));
 		ADirectionalLight* Shine = AddDirectionalLight(World, TEXT("Earthshine"), EarthUe, EarthO->GetNumberField(TEXT("earthshine_lux")), EarthO->GetNumberField(TEXT("angular_diameter_deg")));
 		Shine->GetLightComponent()->SetAffectTranslucentLighting(false);
@@ -327,8 +479,26 @@ namespace RoverSceneBuilder
 		const double Dz = 5.0;
 		const FVector NormalLocal = FVector(-(HeightAt(Dz, 0) - HeightAt(-Dz, 0)) / (2 * Dz), -(HeightAt(0, Dz) - HeightAt(0, -Dz)) / (2 * Dz), 1.0).GetSafeNormal();
 		const FVector NormalUe = RoverFrame::LocalDirToUnreal(NormalLocal.X, NormalLocal.Y, NormalLocal.Z);
-		const FVector Heading = FVector(EarthUe.X, EarthUe.Y, 0.0).GetSafeNormal();
+		FVector Heading = FVector(EarthUe.X, EarthUe.Y, 0.0).GetSafeNormal();
+		// 参照カメラ（-RoverRefCams・-RoverRef）：その構図で、太陽がカメラ側から 35° 左に寄って差すようにローバの向きを決める
+		TSharedPtr<FJsonObject> RefCam;
+		if (!Args.RefCams.IsEmpty() && !Args.RefKey.IsEmpty())
+		{
+			const TSharedPtr<FJsonObject> Refs = LoadJson(Args.RefCams);
+			const TSharedPtr<FJsonObject>* Found = nullptr;
+			if (!Refs || !Refs->GetObjectField(TEXT("cameras"))->TryGetObjectField(Args.RefKey, Found))
+			{
+				UE_LOG(LogRoverScene, Error, TEXT("reference camera %s not found in %s"), *Args.RefKey, *Args.RefCams);
+				return false;
+			}
+			RefCam = *Found;
+			const FVector Cp = JsonVec3(RefCam, TEXT("position_m"));
+			const double Psi = FMath::Atan2(Sd.Y, Sd.X) - FMath::Atan2(Cp.Y, Cp.X) - FMath::DegreesToRadians(35.0);
+			Heading = RoverFrame::LocalDirToUnreal(FMath::Cos(Psi), FMath::Sin(Psi), 0.0);
+			UE_LOG(LogRoverScene, Log, TEXT("reference %s: rover yaw %.1f deg (local)"), *Args.RefKey, FMath::RadiansToDegrees(Psi));
+		}
 		const FVector RoverPos = RoverFrame::LocalToUnreal(0.0, 0.0, HeightAt(0.0, 0.0));
+		AStaticMeshActor* Rover = nullptr;
 		if (!Args.Glb.IsEmpty())
 		{
 			if (UStaticMesh* Mesh = ImportRoverMesh(Args.Glb))
@@ -338,14 +508,17 @@ namespace RoverSceneBuilder
 				const FVector C = Box.GetCenter();
 				const double YawFix = FMath::Abs(FVector2D(C.X, C.Y).Size()) > 10.0 ? 180.0 - FMath::RadiansToDegrees(FMath::Atan2(C.Y, C.X)) : 0.0;
 				UE_LOG(LogRoverScene, Log, TEXT("rover mesh bounds min=%s max=%s center=%s -> yaw fix %.1f deg"), *Box.Min.ToString(), *Box.Max.ToString(), *C.ToString(), YawFix);
-				AStaticMeshActor* Rover = World->SpawnActor<AStaticMeshActor>(RoverPos, FRotationMatrix::MakeFromZX(NormalUe, Heading).Rotator());
+				// ★ AStaticMeshActor の根はメッシュのコンポーネントそのもの。メッシュの向きの補正を相対回転で入れると、
+				//   アクタの向き（方位・地形の傾き）を上書きしてしまう（2026-10-18 に発覚）。体の向き × 補正 を 1 つにして置く
+				const FQuat BodyQ = FRotationMatrix::MakeFromZX(NormalUe, Heading).ToQuat();
+				const FQuat MeshQ = BodyQ * FRotator(0.0, YawFix, 0.0).Quaternion();
+				Rover = World->SpawnActor<AStaticMeshActor>(RoverPos + BodyQ.RotateVector(FVector(0.0, 0.0, -Box.Min.Z)), MeshQ.Rotator());
 				Rover->SetActorLabel(TEXT("Rover"));
 				UStaticMeshComponent* RC = Rover->GetStaticMeshComponent();
 				RC->SetMobility(EComponentMobility::Movable);
 				RC->SetStaticMesh(Mesh);
-				const FRotator Fix(0.0, YawFix, 0.0);
-				RC->SetRelativeRotation(Fix);
-				RC->SetRelativeLocation(FVector(0.0, 0.0, -Box.Min.Z));   // 車輪の下端を地面に
+				UE_LOG(LogRoverScene, Log, TEXT("rover body forward %s  mesh front %s"), *BodyQ.GetForwardVector().ToString(),
+					*RC->GetComponentTransform().TransformVector(FVector(0, -1, 0)).ToString());   // 取り込んだメッシュの前は −Y
 			}
 		}
 
@@ -356,6 +529,31 @@ namespace RoverSceneBuilder
 		auto At = [&](const FVector2D& P, double AboveGround) { return RoverFrame::LocalToUnreal(P.X, P.Y, HeightAt(P.X, P.Y) + AboveGround); };
 		auto Rot = [](const FVector2D& V, double Deg) { const double A = FMath::DegreesToRadians(Deg); return FVector2D(V.X * FMath::Cos(A) - V.Y * FMath::Sin(A), V.X * FMath::Sin(A) + V.Y * FMath::Cos(A)); };
 		const FVector RoverMid = RoverPos + FVector(0, 0, 200.0);
+		if (RefCam)
+		{
+			// 参照カメラ：ローバの体の座標（m・前・左・上）→ ローバのアクタの座標 → 世界。画角と縦横比は元の絵に合わせる
+			const FTransform Body(FRotationMatrix::MakeFromZX(NormalUe, Heading).Rotator(), RoverPos);   // 体の座標（メッシュの補正を含まない）
+			const FVector P = JsonVec3(RefCam, TEXT("position_m"));
+			const FVector F = JsonVec3(RefCam, TEXT("forward"));
+			const FVector Uc = JsonVec3(RefCam, TEXT("up"));
+			const FVector Pos = Body.TransformPosition(RoverFrame::LocalToUnreal(P.X, P.Y, P.Z));
+			const FVector Fw = Body.TransformVector(RoverFrame::LocalDirToUnreal(F.X, F.Y, F.Z));
+			const FVector Up = Body.TransformVector(RoverFrame::LocalDirToUnreal(Uc.X, Uc.Y, Uc.Z));
+			const TArray<TSharedPtr<FJsonValue>>& Sz = RefCam->GetArrayField(TEXT("size_px"));
+			const double Aspect = Sz[0]->AsNumber() / Sz[1]->AsNumber();
+			const double Hfov = FMath::DegreesToRadians(RefCam->GetNumberField(TEXT("hfov_deg")));
+			ACineCameraActor* Cam = AddShot(World, FString::Printf(TEXT("Shot_Ref%s"), *Args.RefKey), Pos, Pos + Fw * 100.0, 24.0f);
+			Cam->SetActorRotation(FRotationMatrix::MakeFromXZ(Fw, Up).Rotator());
+			UCineCameraComponent* C = Cam->GetCineCameraComponent();
+			C->Filmback.SensorWidth = 36.0f;
+			C->Filmback.SensorHeight = 36.0f / Aspect;
+			C->SetCurrentFocalLength(18.0 / FMath::Tan(Hfov / 2.0));
+			const double Gz = HeightAt(RoverFrame::UnrealToLocal(Pos).X, RoverFrame::UnrealToLocal(Pos).Y) * 100.0;
+			UE_LOG(LogRoverScene, Log, TEXT("reference camera %s: %.2f m above the terrain, focal %.1f mm, aspect %.3f"),
+				*Args.RefKey, (Pos.Z - Gz) / 100.0, C->CurrentFocalLength, Aspect);
+		}
+		else
+		{
 		{
 			// 01：後ろ右から、ローバと地平線の地球（地球の方位から少し左を向く）
 			const FVector2D P = -H2 * 24.0 + R2 * 10.0;
@@ -377,6 +575,7 @@ namespace RoverSceneBuilder
 			// 04：上空から斜めに（地形の起伏と影の伸び）
 			const FVector2D P = Rot(S2, 90.0) * 400.0;
 			AddShot(World, TEXT("Shot_04_Overview"), At(P, 150.0), RoverPos, 35.0f);
+		}
 		}
 
 		ARoverShotDirector* Director = World->SpawnActor<ARoverShotDirector>();

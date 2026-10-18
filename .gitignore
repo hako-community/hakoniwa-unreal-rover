@@ -94,3 +94,5 @@ DerivedDataCache/*
 
 # ローバのメッシュ（取り込んだもの）は公開しない。各自の PC で scripts/windows/rover_scene.ps1 -Build が GLB から作る
 /Content/Rover/Vehicles/
+# 参照カメラの比較用の地図（rover_scene.ps1 -Compare が作る。参照の絵の構図を含むので公開しない）
+/Content/Rover/Levels/LunarSouthPole_Ref*

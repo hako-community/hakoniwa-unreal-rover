@@ -28,6 +28,7 @@ pwsh scripts\windows\setup_build.ps1                 # ビルド（Windows Power
 pwsh scripts\windows\rover_scene.ps1 -Build          # /Game/Rover/Levels/LunarSouthPole を作り直す（エディタが自動で開いて閉じる）
 pwsh scripts\windows\rover_scene.ps1 -Shots -Probe   # -game で開き、地形の高さを検査して 4 構図を撮る（Saved\RoverShots\<時刻>\）
 pwsh scripts\windows\rover_scene.ps1 -Open           # エディタで開く（PIE は最初のカメラから見る）
+pwsh scripts\windows\rover_scene.ps1 -Compare        # 参照カメラ（mujoco-rover の ref_cameras.json）の構図で撮り、参照の絵と並べる
 ```
 
 | 要素 | 中身 |
@@ -35,11 +36,13 @@ pwsh scripts\windows\rover_scene.ps1 -Open           # エディタで開く（P
 | 地形 | 16bit 高さ画像 → Landscape（442×442 頂点。DEM の外は端の値を延ばす）。**ヨー 90° で置き**、四角形を割る対角線の向きを MuJoCo の HField とそろえる。同じ 500 点で Unreal − MuJoCo は最大 0.003 m |
 | 座標 | 局所（右手系 m・x 前 y 左 z 上）→ Unreal = (100x, −100y, 100z)（`RoverFrame.h`） |
 | 光 | 太陽（平行光・`sun.json` の向き・照度・視直径 0.53°）、地球（50 km 先の球。太陽に照らされて満ち欠けが出る）、地球照（弱い平行光）。空の光・大気・霧は置かない |
+| レゴリス | Hapke の反射（単一散乱アルベド 0.32・衝効果 B0 1.0・h 0.06・2 項 HG b 0.21・c 0.70・多重散乱の H 関数）をマテリアルで計算（太陽の向きは `MPC_Lunar`）。5 m 格子より細かい凹凸（6〜490 cm の 5 段の勾配ノイズ）を法線に、明るさのむら（±15%）を色に |
 | 写り | 自動露出なし・物理カメラ（ISO 100・1/125 s・f/16）。局所露出は切る（`RoverLunarLook.h`） |
 | ローバ | GLB を 1 メッシュに結合して取り込み、原点に地形の傾きに合わせて置く（静止。関節の同期はこれから）。★ メッシュは git に入れない（`/Content/Rover/Vehicles` は管理外）。clone したら `-Build` で各自の PC で作る（GLB は `-Glb` で指定、省略時は mujoco-rover の `bodies\*\source\*.glb`）。作るまでは地図にローバが映らない |
 | 撮影 | `ARoverShotDirector`：タグ `RoverShot` のシネカメラを順に撮り、フレーム時間を `shots.json` に書く。`-RoverProbeIn/Out` で地形の高さを測る |
 
 * ★ `ADirectionalLight` は生成時に光へピッチ −46° を入れている。スポーンの回転に足されるので、回転は生成のあとで決める。
+* ★ `AStaticMeshActor` の根はメッシュのコンポーネントそのもの。メッシュの向きの補正を相対回転で入れるとアクタの向きを上書きするので、体の向き × 補正を 1 つの回転にして置く。
 * 手で組むときはエディタのコンソールで `Rover.BuildScene -RoverGrid=<grid.json> -RoverSun=<sun.json> -RoverGlb=<glb>`。
 
 ## ライセンス

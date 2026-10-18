@@ -3,6 +3,8 @@
 #   pwsh scripts\windows\rover_scene.ps1 -Build              # 地形タイル・位置暦・GLB から /Game/Rover/Levels/LunarSouthPole を作り直す
 #   pwsh scripts\windows\rover_scene.ps1 -Shots -Probe       # -game で開き、検査点の高さを測って撮影（Saved\RoverShots\<時刻>\）
 #   pwsh scripts\windows\rover_scene.ps1 -Open               # エディタで場面を開く
+#   pwsh scripts\windows\rover_scene.ps1 -Compare            # 参照カメラ（mujoco-rover の bodies\*\generated\ref_cameras.json）ごとに
+#                                                            # 場面を作って撮り、参照の絵と並べる（mujoco-rover の tools\compare_ref_shots.py）
 #
 # 地形と位置暦は hakoniwa-mujoco-rover が作る（tools/dem_tile.py・tools/sun_ephem.py。D13 で simenv-data へ移す予定）。
 # 先に scripts\windows\setup_build.ps1 でビルドしておく。
@@ -12,6 +14,7 @@ param(
     [switch]$Shots,
     [switch]$Probe,
     [switch]$Open,
+    [switch]$Compare,
     [string]$Tile = 'lola_site01_t01',
     [string]$MujocoRover,
     [string]$Glb,
@@ -72,6 +75,28 @@ if ($Shots -or $Probe) {
         if ($LASTEXITCODE -ne 0) { throw '地形の高さの検査が不合格です' }
     }
     Write-Host "[rover_scene] 出力: $out"
+}
+
+if ($Compare) {
+    # 参照カメラ 1 台ごとに別の地図（/Game/Rover/Levels/LunarSouthPole_Ref<番号>。git 管理外）を作り、撮って並べる
+    $refs = @(Get-ChildItem -Path (Join-Path $MujocoRover 'bodies\*\generated\ref_cameras.json') -ErrorAction SilentlyContinue)
+    if ($refs.Count -ne 1) { throw "参照カメラの表が 1 つに決まりません（mujoco-rover で tools\ref_cameras.py を先に）" }
+    $refJson = $refs[0].FullName
+    $keys = (Get-Content -LiteralPath $refJson -Raw -Encoding UTF8 | ConvertFrom-Json).cameras.PSObject.Properties.Name
+    $dirs = @()
+    foreach ($k in $keys) {
+        $refMap = "/Game/Rover/Levels/LunarSouthPole_Ref$k"
+        Invoke-Editor @($uproject, '-unattended', '-nosplash', '-RoverBuildScene', '-RoverQuit',
+            "-RoverGrid=$grid", "-RoverSun=$sun", "-RoverGlb=$glb", "-RoverMap=$refMap",
+            "-RoverRefCams=$refJson", "-RoverRef=$k") (Join-Path $logDir "build_ref$($k)_$stamp.log")
+        $out = Join-Path $root "Saved\RoverShots\$($stamp)_ref$k"
+        New-Item -ItemType Directory -Force $out | Out-Null
+        Invoke-Editor @($uproject, $refMap, '-game', '-windowed', "-ResX=$ResX", "-ResY=$ResY", '-nosplash', '-unattended',
+            "-RoverShot=$out") (Join-Path $out 'game.log')
+        $dirs += $out
+    }
+    $py = Join-Path $MujocoRover 'deps\py\Scripts\python.exe'
+    & $py -I (Join-Path $MujocoRover 'tools\compare_ref_shots.py') @dirs
 }
 
 if ($Open) {
