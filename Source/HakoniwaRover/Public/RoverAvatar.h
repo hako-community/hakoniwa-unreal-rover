@@ -3,7 +3,9 @@
 // 実行時は共有メモリから base_link_pos（車体の位置と姿勢）と joint_state（関節）を読んで動かす。
 //
 // コマンドライン（-game のとき）:
-//   -RoverSync                 共有メモリを読む（外から読むだけ。箱庭のアセットとしては登録しないので時間を止めない）
+//   -RoverSync                 箱庭につなぐ。hakoniwa-unreal-drone と同じく AHakoniwaShmClient でアセットとして登録し（K53）、
+//                              時刻は描画と別のスレッドで世界の時刻に追従させる（描画が遅れても世界の時刻を止めない）。
+//                              PDU は PduManager から読む（drone の HakoniwaAvatar と同じ）。登録は START の前に済ませる
 //   -RoverHakoConfig=<json>    共有メモリの設定（HAKO_CONFIG_PATH）。無ければ環境変数のまま
 //   -RoverChase                後ろを追うカメラで見る
 //   -RoverSyncShot=<png> -RoverSyncShotAfter=<秒>   受信が始まってから指定秒後に 1 枚撮る（確認用）
@@ -14,9 +16,11 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
+#include "HakoniwaObjectInterface.h"
 #include "RoverAvatar.generated.h"
 
 class UCineCameraComponent;
+class UPduManager;
 
 USTRUCT()
 struct FRoverCorner
@@ -33,7 +37,7 @@ struct FRoverCorner
 };
 
 UCLASS()
-class HAKONIWAROVER_API ARoverAvatar : public AActor
+class HAKONIWAROVER_API ARoverAvatar : public AActor, public IHakoniwaObjectInterface
 {
 	GENERATED_BODY()
 
@@ -42,6 +46,10 @@ public:
 
 	virtual void BeginPlay() override;
 	virtual void Tick(float DeltaSeconds) override;
+
+	/** 箱庭（AHakoniwaShmClient）が登録の後に呼ぶ：読む PDU を宣言する */
+	virtual void OnHakoInitialize_Implementation() override;
+	virtual void OnHakoReset_Implementation() override {}
 
 	/** 部品の木（場面を組むときに作る） */
 	UPROPERTY(VisibleAnywhere, Category = "Rover") TObjectPtr<USceneComponent> Body;
@@ -53,6 +61,9 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Rover|Hakoniwa") int32 BaseSize = 72;
 	UPROPERTY(EditAnywhere, Category = "Rover|Hakoniwa") int32 JointChannel = 1;
 	UPROPERTY(EditAnywhere, Category = "Rover|Hakoniwa") int32 JointSize = 4096;
+	UPROPERTY(EditAnywhere, Category = "Rover|Hakoniwa") FString BasePdu = TEXT("base_link_pos");
+	UPROPERTY(EditAnywhere, Category = "Rover|Hakoniwa") FString JointPdu = TEXT("joint_state");
+	UPROPERTY(EditAnywhere, Category = "Rover|Hakoniwa") FString AssetName = TEXT("RoverUnreal");
 
 	/** 体の座標の回転（右手系）を Unreal の回転にする（S·R·S、S = diag(1, −1, 1)） */
 	static FQuat FluRotationToUnreal(const FMatrix& RowMajorFlu);
@@ -63,11 +74,12 @@ private:
 	void UpdateChase(float DeltaSeconds);
 	FString WheelGaps() const;
 	FString FirstCornerPose() const;
+	FString WritePduConfig() const;
+	UPduManager* FindPduManager() const;
 
 	bool bSync = false;
-	bool bAttached = false;
+	bool bDeclared = false;
 	bool bChase = false;
-	double NextAttachTry = 0.0;
 	int64 BaseFrames = 0;
 	int64 JointFrames = 0;
 	double FirstRecvTime = -1.0;

@@ -5,12 +5,15 @@
 #include "CineCameraComponent.h"
 #include "Engine/World.h"
 #include "GameFramework/PlayerController.h"
-#include "HakoCapiCompat.h"
+#include "HakoniwaClientInterface.h"
+#include "HakoniwaShmClient.h"
 #include "HAL/PlatformMisc.h"
 #include "Kismet/GameplayStatics.h"
 #include "Misc/CommandLine.h"
+#include "Misc/FileHelper.h"
 #include "Misc/Parse.h"
 #include "Misc/Paths.h"
+#include "PduManager.h"
 #include "RoverFrame.h"
 #include "RoverLunarLook.h"
 #include "UnrealClient.h"
@@ -98,6 +101,62 @@ void ARoverAvatar::BeginPlay()
 	}
 	UE_LOG(LogRoverAvatar, Log, TEXT("sync=%d chase=%d robot=%s base ch%d joints ch%d corners=%d HAKO_CONFIG_PATH=%s"),
 		bSync, bChase, *RobotName, BaseChannel, JointChannel, Corners.Num(), *FPlatformMisc::GetEnvironmentVariable(TEXT("HAKO_CONFIG_PATH")));
+	if (bSync && !FindPduManager())
+	{
+		// 箱庭のアセット（hakoniwa-unreal-drone の AHakoniwaShmClient）を置く。drone は地図に置くが、rover は撮影・検査でも
+		// 同じ地図を開くので -RoverSync のときだけ置く。BeginPlay で登録し、OnHakoInitialize でこのアクタが PDU を宣言する
+		FActorSpawnParameters P;
+		P.bDeferConstruction = true;
+		AHakoniwaShmClient* Client = GetWorld()->SpawnActor<AHakoniwaShmClient>(AHakoniwaShmClient::StaticClass(), FTransform::Identity, P);
+		if (Client)
+		{
+			Client->ConfigPath = WritePduConfig();
+			Client->AssetName = AssetName;
+			Client->FinishSpawning(FTransform::Identity);
+		}
+	}
+}
+
+FString ARoverAvatar::WritePduConfig() const
+{
+	// PduManager の PDU の表（drone の Content/Config/webavatar.json と同じ形）。ロボット名・チャネル・大きさは
+	// 場面を組むときに viewer_sync.json から入れた値なので、ここで書き出す（手で写すと mujoco-rover とずれる）。
+	// PduManager は Content からの相対で読むので、Saved に書いて Content からの相対の道を返す
+	auto Reader = [this](const FString& Type, const FString& Org, int32 Ch, int32 Size)
+	{
+		return FString::Printf(TEXT("{\"type\":\"%s\",\"org_name\":\"%s\",\"name\":\"%s_%s\",\"channel_id\":%d,\"pdu_size\":%d,\"write_cycle\":1,\"method_type\":\"SHM\"}"),
+			*Type, *Org, *RobotName, *Org, Ch, Size);
+	};
+	const FString Json = FString::Printf(TEXT("{\"robots\":[{\"name\":\"%s\",\"rpc_pdu_readers\":[],\"rpc_pdu_writers\":[],\"shm_pdu_readers\":[%s,%s],\"shm_pdu_writers\":[]}]}"),
+		*RobotName, *Reader(TEXT("geometry_msgs/Twist"), BasePdu, BaseChannel, BaseSize), *Reader(TEXT("sensor_msgs/JointState"), JointPdu, JointChannel, JointSize));
+	const FString File = FPaths::ProjectSavedDir() / TEXT("HakoniwaRover/rover_pdu.json");
+	FFileHelper::SaveStringToFile(Json, *File);
+	FString Rel = FPaths::ConvertRelativePathToFull(File);
+	FPaths::MakePathRelativeTo(Rel, *FPaths::ConvertRelativePathToFull(FPaths::ProjectContentDir()));
+	UE_LOG(LogRoverAvatar, Log, TEXT("pdu config -> %s (from Content: %s)"), *File, *Rel);
+	return Rel;
+}
+
+UPduManager* ARoverAvatar::FindPduManager() const
+{
+	// drone の AHakoniwaAvatar::DeclarePdu と同じく、箱庭のクライアントのインターフェースから PduManager を取る
+	TArray<AActor*> Actors;
+	UGameplayStatics::GetAllActorsWithInterface(GetWorld(), UHakoniwaClientInterface::StaticClass(), Actors);
+	return Actors.Num() > 0 ? IHakoniwaClientInterface::Execute_GetPduManager(Actors[0]) : nullptr;
+}
+
+void ARoverAvatar::OnHakoInitialize_Implementation()
+{
+	UPduManager* Pdu = FindPduManager();
+	if (!Pdu || !Pdu->IsServiceEnabled())
+	{
+		UE_LOG(LogRoverAvatar, Error, TEXT("OnHakoInitialize: PduManager is not ready"));
+		return;
+	}
+	const bool bBase = Pdu->DeclarePduForRead(RobotName, BasePdu);
+	const bool bJoint = Pdu->DeclarePduForRead(RobotName, JointPdu);
+	bDeclared = bBase && bJoint;
+	UE_LOG(LogRoverAvatar, Log, TEXT("OnHakoInitialize: declare for read %s/%s=%d %s/%s=%d"), *RobotName, *BasePdu, bBase, *RobotName, *JointPdu, bJoint);
 }
 
 void ARoverAvatar::ApplyBase(double X, double Y, double Z, double Ax, double Ay, double Az)
@@ -207,22 +266,13 @@ void ARoverAvatar::Tick(float DeltaSeconds)
 	{
 		return;
 	}
-	if (!bAttached)
-	{
-		if (Now >= NextAttachTry)
-		{
-			NextAttachTry = Now + 2.0;
-			bAttached = hako_asset_init();
-			UE_LOG(LogRoverAvatar, Log, TEXT("hako_asset_init: %s"), bAttached ? TEXT("attached") : TEXT("not yet (master running?)"));
-		}
-		return;
-	}
-	if (!hako_asset_is_pdu_created())
+	UPduManager* Pdu = bDeclared ? FindPduManager() : nullptr;
+	if (!Pdu || !Pdu->IsServiceEnabled())
 	{
 		return;
 	}
-	const FTCHARToUTF8 Robot(*RobotName);
-	if (hako_asset_read_pdu_nolock(Robot.Get(), BaseChannel, reinterpret_cast<char*>(Buf.GetData()), BaseSize))
+	// drone の HakoniwaAvatar と同じく PduManager から読む（共有メモリのサービスのスレッドが最新を溜めている）
+	if (Pdu->ReadPduRawData(RobotName, BasePdu, Buf) && Buf.Num() >= BaseSize)
 	{
 		HakoCpp_Twist T {};
 		hako::pdu::PduConvertor<HakoCpp_Twist, hako::pdu::msgs::geometry_msgs::Twist> Conv;
@@ -232,7 +282,7 @@ void ARoverAvatar::Tick(float DeltaSeconds)
 			++BaseFrames;
 		}
 	}
-	if (hako_asset_read_pdu_nolock(Robot.Get(), JointChannel, reinterpret_cast<char*>(Buf.GetData()), JointSize))
+	if (Pdu->ReadPduRawData(RobotName, JointPdu, Buf) && Buf.Num() > 0)
 	{
 		HakoCpp_JointState J {};
 		hako::pdu::PduConvertor<HakoCpp_JointState, hako::pdu::msgs::sensor_msgs::JointState> Conv;

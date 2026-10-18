@@ -13,5 +13,8 @@ public class HakoniwaRover : ModuleRules
 			"Core", "CoreUObject", "Engine", "CinematicCamera",
 		});
 		PrivateDependencyModuleNames.AddRange(new string[] { "Json", "Landscape", "RHI", "HakoniwaPdu" });
+		// 箱庭のアセット（HakoniwaShmClient。hakoniwa-unreal-drone と同じ）：PduManager は公開ヘッダに出る・ゲームパッドを捨てる入力の前処理
+		PublicDependencyModuleNames.AddRange(new string[] { "HakoniwaPdu", "InputCore" });
+		PrivateDependencyModuleNames.AddRange(new string[] { "Slate", "SlateCore" });
 	}
 }
