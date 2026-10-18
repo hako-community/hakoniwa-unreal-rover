@@ -34,6 +34,7 @@
 #include "Materials/MaterialExpressionCameraVectorWS.h"
 #include "Materials/MaterialExpressionCollectionParameter.h"
 #include "Materials/MaterialExpressionCustom.h"
+#include "Materials/MaterialExpressionPerInstanceRandom.h"
 #include "Materials/MaterialExpressionPixelDepth.h"
 #include "Materials/MaterialExpressionVertexNormalWS.h"
 #include "Materials/MaterialExpressionWorldPosition.h"
@@ -145,7 +146,7 @@ namespace
 	//   B(g) = B0/(1+tan(g/2)/h)（衝効果）、P(g) は 2 項 HG（b・c）、H(x) = (1+2x)/(1+2xγ)・γ = √(1−w)
 	//   定数は検討書 §3.7（南極域＝高地：w 0.32・B0 1.0・h 0.06・b 0.21・c 0.70）。μ0・μ・g は面の法線（頂点）・視線・太陽で決める。
 	//   明るさのむら（±15%）を 2 つの大きさの値ノイズで掛ける。μ0 は標準の拡散が掛けるので、ここでは割った形にしてある
-	const TCHAR* HapkeHlsl = TEXT(R"(
+	const TCHAR* HapkeCoreHlsl = TEXT(R"(
 float3 n = normalize(N); float3 v = normalize(V); float3 s = normalize(S.xyz);
 float mu0 = max(dot(n, s), 1e-3); float mu = max(dot(n, v), 1e-3);
 float cg = clamp(dot(s, v), -1.0, 1.0); float g = acos(cg);
@@ -158,6 +159,9 @@ float gam = sqrt(1.0 - w);
 float H0 = (1.0 + 2.0 * mu0) / (1.0 + 2.0 * mu0 * gam);
 float H1 = (1.0 + 2.0 * mu) / (1.0 + 2.0 * mu * gam);
 float bc = w * 0.25 / (mu0 + mu) * ((1.0 + B) * P + H0 * H1 - 1.0);
+)");
+	// 地面の明るさのむら（水平の座標 Pos.xy の 2 段の値ノイズ）
+	const TCHAR* GroundTintHlsl = TEXT(R"(
 float tint = 1.0;
 for (int o = 0; o < 2; o++) {
   float sc = (o == 0) ? 4000.0 : 300.0;
@@ -200,6 +204,53 @@ for (int o = 0; o < 5; o++) {
   gr += fade * am / sc * mul(transpose(acc), dq);
 }
 return normalize(float3(-gr.x, -gr.y, 1.0));
+)");
+
+	// 岩（K48）：地面の凹凸は水平の座標で作るので、岩の側面では縦の筋になった。岩は 3 次元の値ノイズで作る。
+	//   Noise3(p) は格子 1 の値ノイズ（5 次の補間）と、その p についての勾配。格子番号は 1024 で折り返す（地面と同じ理由）
+	const TCHAR* Noise3Hlsl = TEXT(R"(
+float4 nz[3];
+for (int o = 0; o < 3; o++) {
+  float3 q = Pos / Sc[o];
+  float3 i = floor(q); float3 f = q - i;
+  float3 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+  float3 du = 30.0 * f * f * (f * (f - 2.0) + 1.0);
+  float h[8];
+  for (int k = 0; k < 8; k++) {
+    float3 cc = fmod(i + float3(k & 1, (k >> 1) & 1, (k >> 2) & 1), 1024.0);
+    h[k] = frac(sin(dot(cc, float3(127.1, 311.7, 74.7))) * 43758.5453);
+  }
+  float x00 = lerp(h[0], h[1], u.x), x10 = lerp(h[2], h[3], u.x), x01 = lerp(h[4], h[5], u.x), x11 = lerp(h[6], h[7], u.x);
+  float y0 = lerp(x00, x10, u.y), y1 = lerp(x01, x11, u.y);
+  float val = lerp(y0, y1, u.z);
+  float dx = du.x * lerp(lerp(h[1] - h[0], h[3] - h[2], u.y), lerp(h[5] - h[4], h[7] - h[6], u.y), u.z);
+  float dy = du.y * lerp(x10 - x00, x11 - x01, u.z);
+  float dz = du.z * (y1 - y0);
+  nz[o] = float4(val, dx, dy, dz);
+}
+)");
+	// 岩の明るさのむら：3 次元の 2 段（6・25 cm、±12%）と岩ごとの違い（PerInstanceRandom で 0.85〜1.15）
+	const TCHAR* RockTintHlsl = TEXT(R"(
+float Sc[3] = { 6.0, 25.0, 25.0 };
+)");
+	const TCHAR* RockTintTailHlsl = TEXT(R"(
+float tint = (1.0 + 0.12 * (nz[0].x - 0.5)) * (1.0 + 0.12 * (nz[1].x - 0.5)) * (0.85 + 0.3 * R);
+return saturate(bc * tint).xxx;
+)");
+	// 岩の細かい凹凸：3 段（3・8・22 cm）の勾配で、世界座標の法線を面に沿って傾ける（マテリアルは世界座標の法線を出す）。
+	//   画面上で細かすぎる段は弱める
+	const TCHAR* RockNormalHeadHlsl = TEXT(R"(
+float Sc[3] = { 3.0, 8.0, 22.0 };
+)");
+	const TCHAR* RockNormalTailHlsl = TEXT(R"(
+float3 n = normalize(N);
+float am[3] = { 0.25, 0.30, 0.30 };
+float3 gs = float3(0, 0, 0);
+for (int o = 0; o < 3; o++) {
+  gs += saturate(2.0 - Depth / (Sc[o] * 400.0)) * am[o] * nz[o].yzw;
+}
+gs -= dot(gs, n) * n;
+return normalize(n - gs);
 )");
 
 	UMaterialExpressionCustom* AddCustom(UMaterial* M, const TCHAR* Code, ECustomMaterialOutputType Out, const TArray<TPair<FName, UMaterialExpression*>>& In, int32 Y)
@@ -261,7 +312,7 @@ return normalize(float3(-gr.x, -gr.y, 1.0));
 		S->Collection = Mpc;
 		S->ParameterName = TEXT("SunDir");
 		S->ParameterId = Mpc->GetParameterId(S->ParameterName);
-		UMaterialExpressionCustom* Hapke = AddCustom(M, HapkeHlsl, CMOT_Float3, { {TEXT("N"), N}, {TEXT("V"), V}, {TEXT("S"), S}, {TEXT("Pos"), Pos} }, 0);
+		UMaterialExpressionCustom* Hapke = AddCustom(M, *(FString(HapkeCoreHlsl) + GroundTintHlsl), CMOT_Float3, { {TEXT("N"), N}, {TEXT("V"), V}, {TEXT("S"), S}, {TEXT("Pos"), Pos} }, 0);
 		Hapke->Description = TEXT("Hapke");
 		UMaterialEditingLibrary::ConnectMaterialProperty(Hapke, TEXT(""), MP_BaseColor);
 		auto* Depth = UMaterialEditingLibrary::CreateMaterialExpression(M, UMaterialExpressionPixelDepth::StaticClass(), -800, 400);
@@ -274,11 +325,61 @@ return normalize(float3(-gr.x, -gr.y, 1.0));
 		auto* Sp = Cast<UMaterialExpressionConstant>(UMaterialEditingLibrary::CreateMaterialExpression(M, UMaterialExpressionConstant::StaticClass(), -400, 600));
 		Sp->R = 0.0f;
 		UMaterialEditingLibrary::ConnectMaterialProperty(Sp, TEXT(""), MP_Specular);
-		M->bUsedWithInstancedStaticMeshes = true;   // 岩（HISM）にも使う
+		M->bUsedWithInstancedStaticMeshes = true;
 		const TArray<FString> Errors = UMaterialEditingLibrary::RecompileMaterial(M);
 		for (const FString& E : Errors)
 		{
 			UE_LOG(LogRoverScene, Error, TEXT("M_Regolith: %s"), *E);
+		}
+		M->MarkPackageDirty();
+		return M;
+	}
+
+	/** 岩（K48）：反射は地面と同じ Hapke、明るさのむらと細かい凹凸は 3 次元（岩の側面でも筋にならない）。岩ごとに明るさを変える */
+	UMaterial* MakeRockMaterial(UMaterialParameterCollection* Mpc)
+	{
+		const FString Name = TEXT("M_Rock");
+		const FString PackagePath = FString(MaterialDir) / Name;
+		UMaterial* M = LoadObject<UMaterial>(nullptr, *(PackagePath + TEXT(".") + Name), nullptr, LOAD_NoWarn | LOAD_Quiet);
+		if (M)
+		{
+			UMaterialEditingLibrary::DeleteAllMaterialExpressions(M);
+		}
+		else
+		{
+			UPackage* Pkg = CreatePackage(*PackagePath);
+			M = NewObject<UMaterial>(Pkg, *Name, RF_Public | RF_Standalone | RF_Transactional);
+			FAssetRegistryModule::AssetCreated(M);
+		}
+		auto* N = UMaterialEditingLibrary::CreateMaterialExpression(M, UMaterialExpressionVertexNormalWS::StaticClass(), -800, 0);
+		auto* V = UMaterialEditingLibrary::CreateMaterialExpression(M, UMaterialExpressionCameraVectorWS::StaticClass(), -800, 100);
+		auto* Pos = UMaterialEditingLibrary::CreateMaterialExpression(M, UMaterialExpressionWorldPosition::StaticClass(), -800, 300);
+		auto* Rnd = UMaterialEditingLibrary::CreateMaterialExpression(M, UMaterialExpressionPerInstanceRandom::StaticClass(), -800, 500);
+		auto* S = Cast<UMaterialExpressionCollectionParameter>(UMaterialEditingLibrary::CreateMaterialExpression(M, UMaterialExpressionCollectionParameter::StaticClass(), -800, 200));
+		S->Collection = Mpc;
+		S->ParameterName = TEXT("SunDir");
+		S->ParameterId = Mpc->GetParameterId(S->ParameterName);
+		UMaterialExpressionCustom* Hapke = AddCustom(M, *(FString(HapkeCoreHlsl) + RockTintHlsl + Noise3Hlsl + RockTintTailHlsl), CMOT_Float3,
+			{ {TEXT("N"), N}, {TEXT("V"), V}, {TEXT("S"), S}, {TEXT("Pos"), Pos}, {TEXT("R"), Rnd} }, 0);
+		Hapke->Description = TEXT("HapkeRock");
+		UMaterialEditingLibrary::ConnectMaterialProperty(Hapke, TEXT(""), MP_BaseColor);
+		auto* Depth = UMaterialEditingLibrary::CreateMaterialExpression(M, UMaterialExpressionPixelDepth::StaticClass(), -800, 400);
+		UMaterialExpressionCustom* Bump = AddCustom(M, *(FString(RockNormalHeadHlsl) + Noise3Hlsl + RockNormalTailHlsl), CMOT_Float3,
+			{ {TEXT("N"), N}, {TEXT("Pos"), Pos}, {TEXT("Depth"), Depth} }, 300);
+		Bump->Description = TEXT("RockNormal");
+		UMaterialEditingLibrary::ConnectMaterialProperty(Bump, TEXT(""), MP_Normal);
+		M->bTangentSpaceNormal = false;             // 法線は世界座標で出す
+		auto* R = Cast<UMaterialExpressionConstant>(UMaterialEditingLibrary::CreateMaterialExpression(M, UMaterialExpressionConstant::StaticClass(), -400, 500));
+		R->R = 1.0f;
+		UMaterialEditingLibrary::ConnectMaterialProperty(R, TEXT(""), MP_Roughness);
+		auto* Sp = Cast<UMaterialExpressionConstant>(UMaterialEditingLibrary::CreateMaterialExpression(M, UMaterialExpressionConstant::StaticClass(), -400, 600));
+		Sp->R = 0.0f;
+		UMaterialEditingLibrary::ConnectMaterialProperty(Sp, TEXT(""), MP_Specular);
+		M->bUsedWithInstancedStaticMeshes = true;   // 岩は HISM
+		const TArray<FString> Errors = UMaterialEditingLibrary::RecompileMaterial(M);
+		for (const FString& E : Errors)
+		{
+			UE_LOG(LogRoverScene, Error, TEXT("M_Rock: %s"), *E);
 		}
 		M->MarkPackageDirty();
 		return M;
@@ -645,7 +746,8 @@ namespace RoverSceneBuilder
 		const FVector SunUe = RoverFrame::LocalDirToUnreal(Sd.X, Sd.Y, Sd.Z);
 		const FVector EarthUe = RoverFrame::LocalDirToUnreal(Ed.X, Ed.Y, Ed.Z);
 
-		UMaterial* Regolith = MakeRegolithMaterial(MakeLunarCollection(SunUe));
+		UMaterialParameterCollection* Mpc = MakeLunarCollection(SunUe);
+		UMaterial* Regolith = MakeRegolithMaterial(Mpc);
 		UMaterial* EarthMat = MakeLitMaterial(TEXT("M_Earth"), FLinearColor(0.22f, 0.30f, 0.45f), 0.6f, 0.5f);
 
 		// 頂点 (0, 0) = 局所 (+half, +half) = Unreal (+half, −half)
@@ -673,7 +775,7 @@ namespace RoverSceneBuilder
 		FVector4 BigRock(0.0, 0.0, 0.0, 0.0);
 		if (FPaths::FileExists(RocksJson))
 		{
-			BuildRocks(World, RocksJson, Regolith, &BigRock);
+			BuildRocks(World, RocksJson, MakeRockMaterial(Mpc), &BigRock);
 		}
 
 		// --- 光：太陽・地球・地球照 ---
