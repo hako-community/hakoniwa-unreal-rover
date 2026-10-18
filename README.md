@@ -25,7 +25,8 @@ pwsh scripts\windows\setup_build.ps1
 
 ```powershell
 pwsh scripts\windows\setup_build.ps1                 # ビルド（Windows PowerShell 5.1 でも可。スクリプトは BOM 付き UTF-8）
-pwsh scripts\windows\rover_scene.ps1 -Build          # /Game/Rover/Levels/LunarSouthPole を作り直す（エディタが自動で開いて閉じる）
+pwsh scripts\windows\rover_scene.ps1 -Build          # /Game/Rover/Levels/LunarSouthPole を作る（★ clone の後に必須。約 30 秒。エディタが自動で開いて閉じる）
+#   地図・岩のメッシュ・マテリアル（Content/Rover/Levels・Terrain・Materials）は生成物で git 管理外（0.5 m の地形で地図が 100 MB を超えるため）
 pwsh scripts\windows\rover_scene.ps1 -Shots -Probe   # -game で開き、地形の高さを検査して 4 構図を撮る（Saved\RoverShots\<時刻>\）
 pwsh scripts\windows\rover_scene.ps1 -Open           # エディタで開く（PIE は最初のカメラから見る）
 pwsh scripts\windows\rover_scene.ps1 -Compare        # 参照カメラ（mujoco-rover の ref_cameras.json）の構図で撮り、参照の絵と並べる

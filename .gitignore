@@ -96,3 +96,8 @@ DerivedDataCache/*
 /Content/Rover/Vehicles/
 # 参照カメラの比較用の地図（rover_scene.ps1 -Compare が作る。参照の絵の構図を含むので公開しない）
 /Content/Rover/Levels/LunarSouthPole_Ref*
+
+# 場面の生成物（rover_scene.ps1 -Build が作る。0.5 m の地形で地図が 100 MB を超えるため git に入れない）
+/Content/Rover/Levels/
+/Content/Rover/Terrain/
+/Content/Rover/Materials/
