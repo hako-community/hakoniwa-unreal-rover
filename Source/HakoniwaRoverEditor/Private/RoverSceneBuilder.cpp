@@ -540,7 +540,9 @@ namespace RoverSceneBuilder
 		UE_LOG(LogRoverScene, Log, TEXT("landscape %dx%d (%d comps)  loc=%s scale=%s"), Size, Size, Comps * Comps, *LandLoc.ToString(), *LandScale.ToString());
 
 		// --- 光：太陽・地球・地球照 ---
-		AddDirectionalLight(World, TEXT("Sun"), SunUe, SunO->GetNumberField(TEXT("illuminance_lux")), SunO->GetNumberField(TEXT("angular_diameter_deg")));
+		ADirectionalLight* SunL = AddDirectionalLight(World, TEXT("Sun"), SunUe, SunO->GetNumberField(TEXT("illuminance_lux")), SunO->GetNumberField(TEXT("angular_diameter_deg")));
+		// 半透明・霧などに使う主の平行光源は太陽（決めないと 2 つが競合するという警告が画面に出る）
+		CastChecked<UDirectionalLightComponent>(SunL->GetLightComponent())->SetForwardShadingPriority(1);
 		ADirectionalLight* Shine = AddDirectionalLight(World, TEXT("Earthshine"), EarthUe, EarthO->GetNumberField(TEXT("earthshine_lux")), EarthO->GetNumberField(TEXT("angular_diameter_deg")));
 		Shine->GetLightComponent()->SetAffectTranslucentLighting(false);
 
