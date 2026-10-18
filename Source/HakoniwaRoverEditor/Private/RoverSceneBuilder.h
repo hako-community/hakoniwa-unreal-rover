@@ -18,6 +18,7 @@ struct FRoverSceneArgs
 	FString Sun;    // <name>.sun.json
 	FString Glb;    // ローバの GLB（空なら置かない）
 	FString Map = TEXT("/Game/Rover/Levels/LunarSouthPole");
+	FString ViewerSync;  // viewer_sync.json（あれば部品の木のローバ。PLANT の走行を写せる）
 	FString RefCams;   // 参照カメラの表（ローバの体の座標）。RefKey と一緒に指定すると、その構図のカメラ 1 台だけの場面にする
 	FString RefKey;
 };

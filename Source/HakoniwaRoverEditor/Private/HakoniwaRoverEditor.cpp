@@ -25,6 +25,7 @@ namespace
 		FParse::Value(Cmd, TEXT("-RoverGlb="), A.Glb);
 		FParse::Value(Cmd, TEXT("-RoverMap="), A.Map);
 		FParse::Value(Cmd, TEXT("-RoverRefCams="), A.RefCams);
+		FParse::Value(Cmd, TEXT("-RoverViewerSync="), A.ViewerSync);
 		FParse::Value(Cmd, TEXT("-RoverRef="), A.RefKey);
 		return A;
 	}

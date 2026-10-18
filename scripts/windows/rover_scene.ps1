@@ -39,6 +39,9 @@ if (-not $Glb) {
     $Glb = $found[0].FullName
 }
 $glb = $Glb
+# 部品の木のローバの契約（mujoco-rover の tools/viewer_sync.py）。あれば PLANT の走行を写せるローバにする
+$viewerSync = @(Get-ChildItem -Path (Join-Path $MujocoRover 'bodies\*\generated\viewer_sync.json') -ErrorAction SilentlyContinue | Select-Object -First 1)
+$syncArg = if ($viewerSync) { "-RoverViewerSync=$($viewerSync[0].FullName)" } else { '-RoverNoViewerSync' }
 $editor = Join-Path $EngineRoot 'Engine\Binaries\Win64\UnrealEditor.exe'
 $map = '/Game/Rover/Levels/LunarSouthPole'
 foreach ($f in @($grid, $sun, $editor)) { if (-not (Test-Path $f)) { throw "見つかりません: $f" } }
@@ -55,7 +58,7 @@ function Invoke-Editor([string[]]$Arguments, [string]$Log) {
 
 if ($Build) {
     Invoke-Editor @($uproject, '-unattended', '-nosplash', '-RoverBuildScene', '-RoverQuit',
-        "-RoverGrid=$grid", "-RoverSun=$sun", "-RoverGlb=$glb", "-RoverMap=$map") (Join-Path $logDir "build_$stamp.log")
+        "-RoverGrid=$grid", "-RoverSun=$sun", "-RoverGlb=$glb", $syncArg, "-RoverMap=$map") (Join-Path $logDir "build_$stamp.log")
 }
 
 if ($Shots -or $Probe) {
@@ -87,7 +90,7 @@ if ($Compare) {
     foreach ($k in $keys) {
         $refMap = "/Game/Rover/Levels/LunarSouthPole_Ref$k"
         Invoke-Editor @($uproject, '-unattended', '-nosplash', '-RoverBuildScene', '-RoverQuit',
-            "-RoverGrid=$grid", "-RoverSun=$sun", "-RoverGlb=$glb", "-RoverMap=$refMap",
+            "-RoverGrid=$grid", "-RoverSun=$sun", "-RoverGlb=$glb", $syncArg, "-RoverMap=$refMap",
             "-RoverRefCams=$refJson", "-RoverRef=$k") (Join-Path $logDir "build_ref$($k)_$stamp.log")
         $out = Join-Path $root "Saved\RoverShots\$($stamp)_ref$k"
         New-Item -ItemType Directory -Force $out | Out-Null

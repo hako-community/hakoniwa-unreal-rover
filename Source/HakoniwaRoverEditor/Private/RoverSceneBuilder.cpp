@@ -41,6 +41,7 @@
 #include "Misc/Paths.h"
 #include "Modules/ModuleManager.h"
 #include "RoverFrame.h"
+#include "RoverAvatar.h"
 #include "RoverLunarLook.h"
 #include "RoverShotDirector.h"
 #include "RoverViewGameMode.h"
@@ -276,26 +277,29 @@ return normalize(float3(-gr.x, -gr.y, 1.0));
 		return M;
 	}
 
-	/** GLB を 1 つのスタティックメッシュとして取り込む（glTF 用の既定のパイプラインを写して、メッシュを結合する設定に）。 */
-	UStaticMesh* ImportRoverMesh(const FString& Glb)
+	/** GLB を取り込む（glTF 用の既定のパイプラインを写して使う）。bCombine なら 1 つに結合、でなければ部品ごと（モデルの座標に焼き込み）。
+	 *  戻り値はメッシュの名前 → スタティックメッシュ */
+	TMap<FString, UStaticMesh*> ImportRoverMeshes(const FString& Glb, bool bCombine)
 	{
+		TMap<FString, UStaticMesh*> Out;
 		UInterchangeManager& IM = UInterchangeManager::GetInterchangeManager();
 		// アセットの名前は元のファイル名から付くので、一般名 rover.glb に写してから取り込む
 		const FString Staged = FPaths::ConvertRelativePathToFull(FPaths::ProjectSavedDir() / TEXT("RoverImport/rover.glb"));
 		if (!IFileManager::Get().MakeDirectory(*FPaths::GetPath(Staged), true) || IFileManager::Get().Copy(*Staged, *Glb) != COPY_OK)
 		{
 			UE_LOG(LogRoverScene, Error, TEXT("cannot stage %s"), *Glb);
-			return nullptr;
+			return Out;
 		}
 		UInterchangeSourceData* Src = UInterchangeManager::CreateSourceData(Staged);
 		UInterchangeGenericAssetsPipeline* Base = LoadObject<UInterchangeGenericAssetsPipeline>(nullptr, TEXT("/Interchange/Pipelines/DefaultGLTFAssetsPipeline.DefaultGLTFAssetsPipeline"));
 		if (!Src || !Base)
 		{
 			UE_LOG(LogRoverScene, Error, TEXT("interchange: source or default glTF pipeline missing"));
-			return nullptr;
+			return Out;
 		}
 		UInterchangeGenericAssetsPipeline* Pipe = DuplicateObject(Base, GetTransientPackage());
-		Pipe->MeshPipeline->CombineStaticMeshesBehavior = EInterchangeCombineStaticMeshesBehavior::All;
+		Pipe->MeshPipeline->CombineStaticMeshesBehavior = bCombine ? EInterchangeCombineStaticMeshesBehavior::All : EInterchangeCombineStaticMeshesBehavior::DoNotCombine;
+		Pipe->CommonMeshesProperties->bBakeMeshes = true;   // 部品の位置はモデルの座標に焼き込む（関節の軸まわりの回転は部品の木で付ける）
 		FImportAssetParameters Params;
 		Params.bIsAutomated = true;
 		Params.bReplaceExisting = true;
@@ -305,17 +309,99 @@ return normalize(float3(-gr.x, -gr.y, 1.0));
 		if (!IM.ImportAsset(VehicleDir, Src, Params, Imported))
 		{
 			UE_LOG(LogRoverScene, Error, TEXT("interchange: import failed: %s"), *Glb);
-			return nullptr;
+			return Out;
 		}
 		for (UObject* O : Imported)
 		{
 			if (UStaticMesh* SM = Cast<UStaticMesh>(O))
 			{
-				return SM;
+				FString N = SM->GetName();
+				N.RemoveFromStart(TEXT("SM_"));
+				Out.Add(N, SM);
 			}
 		}
-		UE_LOG(LogRoverScene, Error, TEXT("interchange: no static mesh among %d objects"), Imported.Num());
-		return nullptr;
+		UE_LOG(LogRoverScene, Log, TEXT("interchange: %d static meshes (combine=%d)"), Out.Num(), bCombine);
+		return Out;
+	}
+
+	/** 部品の木のローバ（ARoverAvatar）を組む。viewer_sync.json（hakoniwa-mujoco-rover の tools/viewer_sync.py）が契約。
+	 *  アクタ = 車体（chassis）の座標。Body = GLB の原点（model_offset）。隅ごとに 懸架（直動）→ 操舵 → 車輪 の部品。
+	 *  部品のメッシュはモデルの座標に焼き込んであるので、関節の部品の下では「−取付位置」だけずらして置く */
+	ARoverAvatar* BuildRoverAvatar(UWorld* World, const FString& Glb, const TSharedPtr<FJsonObject>& Sync, const FVector& GroundPos, const FQuat& BodyQ)
+	{
+		const TMap<FString, UStaticMesh*> Meshes = ImportRoverMeshes(Glb, false);
+		const FVector Off = JsonVec3(Sync, TEXT("model_offset_m"));
+		const FVector OffUe = RoverFrame::LocalToUnreal(Off.X, Off.Y, Off.Z);
+		ARoverAvatar* A = World->SpawnActor<ARoverAvatar>(GroundPos - BodyQ.RotateVector(OffUe), BodyQ.Rotator());
+		A->SetActorLabel(TEXT("Rover"));
+		A->Body->SetRelativeLocation(OffUe);
+		A->RobotName = Sync->GetStringField(TEXT("robot_name"));
+		const TSharedPtr<FJsonObject> Pdu = Sync->GetObjectField(TEXT("pdu"));
+		A->BaseChannel = Pdu->GetObjectField(TEXT("base"))->GetIntegerField(TEXT("channel_id"));
+		A->BaseSize = Pdu->GetObjectField(TEXT("base"))->GetIntegerField(TEXT("pdu_size"));
+		A->JointChannel = Pdu->GetObjectField(TEXT("joints"))->GetIntegerField(TEXT("channel_id"));
+		A->JointSize = Pdu->GetObjectField(TEXT("joints"))->GetIntegerField(TEXT("pdu_size"));
+
+		auto AddScene = [A](const FString& Name, USceneComponent* Parent, const FVector& Loc)
+		{
+			USceneComponent* C = NewObject<USceneComponent>(A, *Name, RF_Transactional);
+			C->SetMobility(EComponentMobility::Movable);
+			C->SetupAttachment(Parent);
+			C->SetRelativeLocation(Loc);
+			A->AddInstanceComponent(C);
+			C->RegisterComponent();
+			return C;
+		};
+		TMap<FString, TPair<USceneComponent*, FVector>> WheelComp;
+		for (const TSharedPtr<FJsonValue>& V : Sync->GetArrayField(TEXT("corners")))
+		{
+			const TSharedPtr<FJsonObject> O = V->AsObject();
+			const FVector Pm = JsonVec3(O, TEXT("pivot_m"));
+			FRoverCorner C;
+			C.SuspJoint = O->GetStringField(TEXT("susp"));
+			C.WheelJoint = O->GetStringField(TEXT("wheel"));
+			O->TryGetStringField(TEXT("steer"), C.SteerJoint);
+			C.RestPivotCm = RoverFrame::LocalToUnreal(Pm.X, Pm.Y, Pm.Z);
+			C.Susp = AddScene(C.SuspJoint, A->GetRootComponent(), C.RestPivotCm);
+			C.Steer = C.SteerJoint.IsEmpty() ? nullptr : AddScene(C.SteerJoint, C.Susp, FVector::ZeroVector);
+			C.Wheel = AddScene(C.WheelJoint, C.Steer ? C.Steer.Get() : C.Susp.Get(), FVector::ZeroVector);
+			WheelComp.Add(C.WheelJoint, TPair<USceneComponent*, FVector>(C.Wheel, C.RestPivotCm));
+			A->Corners.Add(C);
+		}
+
+		// 取り込みの座標（X = glTF x・Y = glTF z・Z = glTF y）→ 体の座標（Unreal）はヨー +90°（glTF の前 −z が +X に来る）
+		const FQuat Fix = FRotator(0.0, 90.0, 0.0).Quaternion();
+		int32 Placed = 0;
+		FBox BodyBox(ForceInit);
+		for (const TPair<FString, TSharedPtr<FJsonValue>>& P : Sync->GetObjectField(TEXT("parts"))->Values)
+		{
+			UStaticMesh* const* SM = Meshes.Find(P.Key);
+			if (!SM)
+			{
+				UE_LOG(LogRoverScene, Warning, TEXT("rover part %s: no imported mesh"), *P.Key);
+				continue;
+			}
+			const FString Owner = P.Value->AsString();
+			const TPair<USceneComponent*, FVector>* W = WheelComp.Find(Owner);
+			USceneComponent* Parent = W ? W->Key : A->Body.Get();
+			const FVector Loc = W ? OffUe - W->Value : FVector::ZeroVector;
+			UStaticMeshComponent* C = NewObject<UStaticMeshComponent>(A, *(TEXT("Part_") + P.Key), RF_Transactional);
+			C->SetMobility(EComponentMobility::Movable);
+			C->SetStaticMesh(*SM);
+			C->SetupAttachment(Parent);
+			C->SetRelativeLocationAndRotation(Loc, Fix);
+			A->AddInstanceComponent(C);
+			C->RegisterComponent();
+			if (!W)
+			{
+				BodyBox += (*SM)->GetBoundingBox().TransformBy(C->GetRelativeTransform() * FTransform(OffUe));
+			}
+			++Placed;
+		}
+		// 確認：車体の外形の中心は後ろ寄り（体の座標で x < 0）・下端は GLB の原点（地面）
+		UE_LOG(LogRoverScene, Log, TEXT("rover avatar: %d parts, %d corners, body box (actor frame) min=%s max=%s  robot=%s base ch%d joints ch%d"),
+			Placed, A->Corners.Num(), *BodyBox.Min.ToString(), *BodyBox.Max.ToString(), *A->RobotName, A->BaseChannel, A->JointChannel);
+		return A;
 	}
 
 	ACineCameraActor* AddShot(UWorld* World, const FString& Name, const FVector& Pos, const FVector& LookAt, float FocalMm)
@@ -498,27 +584,32 @@ namespace RoverSceneBuilder
 			UE_LOG(LogRoverScene, Log, TEXT("reference %s: rover yaw %.1f deg (local)"), *Args.RefKey, FMath::RadiansToDegrees(Psi));
 		}
 		const FVector RoverPos = RoverFrame::LocalToUnreal(0.0, 0.0, HeightAt(0.0, 0.0));
-		AStaticMeshActor* Rover = nullptr;
-		if (!Args.Glb.IsEmpty())
+		AActor* Rover = nullptr;
+		const FQuat BodyQ = FRotationMatrix::MakeFromZX(NormalUe, Heading).ToQuat();
+		const TSharedPtr<FJsonObject> Sync = Args.ViewerSync.IsEmpty() ? nullptr : LoadJson(Args.ViewerSync);
+		if (!Args.Glb.IsEmpty() && Sync)
 		{
-			if (UStaticMesh* Mesh = ImportRoverMesh(Args.Glb))
+			// 部品の木のローバ（ROV-22。PLANT の走行を写せる）。静止時は GLB の原点（車輪の下端）を地面に置く
+			Rover = BuildRoverAvatar(World, Args.Glb, Sync, RoverPos, BodyQ);
+		}
+		else if (!Args.Glb.IsEmpty())
+		{
+			const TMap<FString, UStaticMesh*> Meshes = ImportRoverMeshes(Args.Glb, true);
+			if (Meshes.Num() > 0)
 			{
+				UStaticMesh* Mesh = Meshes.CreateConstIterator().Value();
 				// 取り込んだメッシュの前を +X にそろえる：外形の中心は後ろ寄り（glTF で +0.57 m）なので、中心が −X 側に来る回転を選ぶ
 				const FBox Box = Mesh->GetBoundingBox();
 				const FVector C = Box.GetCenter();
 				const double YawFix = FMath::Abs(FVector2D(C.X, C.Y).Size()) > 10.0 ? 180.0 - FMath::RadiansToDegrees(FMath::Atan2(C.Y, C.X)) : 0.0;
-				UE_LOG(LogRoverScene, Log, TEXT("rover mesh bounds min=%s max=%s center=%s -> yaw fix %.1f deg"), *Box.Min.ToString(), *Box.Max.ToString(), *C.ToString(), YawFix);
 				// ★ AStaticMeshActor の根はメッシュのコンポーネントそのもの。メッシュの向きの補正を相対回転で入れると、
 				//   アクタの向き（方位・地形の傾き）を上書きしてしまう（2026-10-18 に発覚）。体の向き × 補正 を 1 つにして置く
-				const FQuat BodyQ = FRotationMatrix::MakeFromZX(NormalUe, Heading).ToQuat();
 				const FQuat MeshQ = BodyQ * FRotator(0.0, YawFix, 0.0).Quaternion();
-				Rover = World->SpawnActor<AStaticMeshActor>(RoverPos + BodyQ.RotateVector(FVector(0.0, 0.0, -Box.Min.Z)), MeshQ.Rotator());
-				Rover->SetActorLabel(TEXT("Rover"));
-				UStaticMeshComponent* RC = Rover->GetStaticMeshComponent();
-				RC->SetMobility(EComponentMobility::Movable);
-				RC->SetStaticMesh(Mesh);
-				UE_LOG(LogRoverScene, Log, TEXT("rover body forward %s  mesh front %s"), *BodyQ.GetForwardVector().ToString(),
-					*RC->GetComponentTransform().TransformVector(FVector(0, -1, 0)).ToString());   // 取り込んだメッシュの前は −Y
+				AStaticMeshActor* Static = World->SpawnActor<AStaticMeshActor>(RoverPos + BodyQ.RotateVector(FVector(0.0, 0.0, -Box.Min.Z)), MeshQ.Rotator());
+				Static->SetActorLabel(TEXT("Rover"));
+				Static->GetStaticMeshComponent()->SetMobility(EComponentMobility::Movable);
+				Static->GetStaticMeshComponent()->SetStaticMesh(Mesh);
+				Rover = Static;
 			}
 		}
 
