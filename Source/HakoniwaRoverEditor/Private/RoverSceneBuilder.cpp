@@ -684,11 +684,22 @@ namespace RoverSceneBuilder
 		}
 		const FString TileName = Grid->GetStringField(TEXT("name"));
 		const TSharedPtr<FJsonObject> G = Grid->GetObjectField(TEXT("grid"));
-		const TSharedPtr<FJsonObject> U = Grid->GetObjectField(TEXT("unreal"));
+		TSharedPtr<FJsonObject> U = Grid->GetObjectField(TEXT("unreal"));
 		const double Half = G->GetNumberField(TEXT("half_extent_m"));
-		const double Res = G->GetNumberField(TEXT("resolution_m"));
-		const double ZMin = G->GetNumberField(TEXT("z_local_min_m"));
-		const double ZMax = G->GetNumberField(TEXT("z_local_max_m"));
+		double Res = G->GetNumberField(TEXT("resolution_m"));
+		double ZMin = G->GetNumberField(TEXT("z_local_min_m"));
+		double ZMax = G->GetNumberField(TEXT("z_local_max_m"));
+		// 小クレータのある細かい格子（simenv-data の crater_field.py --fine。ROV-28）があれば、地形はそちら（0.5 m）で作る。
+		//   物理（mujoco-rover の TerrainWindow）も同じ格子を同じ向きの三角形で使う
+		const FString FineJson = Args.Grid.Replace(TEXT(".grid.json"), TEXT(".fine.json"));
+		if (const TSharedPtr<FJsonObject> Fine = FPaths::FileExists(FineJson) ? LoadJson(FineJson) : nullptr; Fine && Fine->HasField(TEXT("unreal")))
+		{
+			U = Fine->GetObjectField(TEXT("unreal"));
+			Res = Fine->GetNumberField(TEXT("resolution_m"));
+			ZMin = Fine->GetNumberField(TEXT("z_local_min_m"));
+			ZMax = Fine->GetNumberField(TEXT("z_local_max_m"));
+			UE_LOG(LogRoverScene, Log, TEXT("fine terrain: %s (%.2f m)"), *FPaths::GetCleanFilename(FineJson), Res);
+		}
 
 		// --- 地形：16bit 高さ画像 ---
 		int32 W = 0, H = 0;
