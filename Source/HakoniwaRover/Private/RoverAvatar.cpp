@@ -9,6 +9,8 @@
 #include "HakoniwaShmClient.h"
 #include "HAL/PlatformMisc.h"
 #include "Kismet/GameplayStatics.h"
+#include "HAL/PlatformTime.h"
+#include "Misc/App.h"
 #include "Misc/CommandLine.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Parse.h"
@@ -303,13 +305,30 @@ void ARoverAvatar::Tick(float DeltaSeconds)
 	{
 		FirstRecvTime = Now;
 	}
-	LogTimer += DeltaSeconds;
-	if (LogTimer >= 5.0)
+	// fps は 5 秒の窓の平均（壁時計）と、いちばん長かったフレーム。前面かどうか（K55：裏に回ると遅くなる）も出す
+	const double Wall = FPlatformTime::Seconds();
+	if (LogWindowStart < 0.0)
 	{
-		LogTimer = 0.0;
+		LogWindowStart = Wall;
+	}
+	++LogFrames;
+	if (LastFrameWall > 0.0)
+	{
+		MaxFrameMs = FMath::Max(MaxFrameMs, (Wall - LastFrameWall) * 1000.0);
+	}
+	LastFrameWall = Wall;
+	FocusFrames += FApp::HasFocus() ? 1 : 0;
+	if (Wall - LogWindowStart >= 5.0)
+	{
+		const double Fps = LogFrames / (Wall - LogWindowStart);
 		const FVector L = RoverFrame::UnrealToLocal(GetActorLocation());
-		UE_LOG(LogRoverAvatar, Log, TEXT("recv base=%lld joints=%lld  pos (%.2f, %.2f, %.2f) m  roll %.1f pitch %.1f deg  fps %.0f  wheel gap [cm] %s  %s"),
-			BaseFrames, JointFrames, L.X, L.Y, L.Z, LastRollDeg, LastPitchDeg, DeltaSeconds > 0 ? 1.0 / DeltaSeconds : 0.0, *WheelGaps(), *FirstCornerPose());
+		UE_LOG(LogRoverAvatar, Log, TEXT("recv base=%lld joints=%lld  pos (%.2f, %.2f, %.2f) m  roll %.1f pitch %.1f deg  fps %.0f (max frame %.0f ms, focus %.0f%%)  wheel gap [cm] %s  %s"),
+			BaseFrames, JointFrames, L.X, L.Y, L.Z, LastRollDeg, LastPitchDeg, Fps, MaxFrameMs, 100.0 * FocusFrames / FMath::Max<int64>(LogFrames, 1),
+			*WheelGaps(), *FirstCornerPose());
+		LogWindowStart = Wall;
+		LogFrames = 0;
+		FocusFrames = 0;
+		MaxFrameMs = 0.0;
 	}
 	if (!SyncShot.IsEmpty() && !bShotDone && FirstRecvTime >= 0.0 && Now - FirstRecvTime >= SyncShotAfter)
 	{

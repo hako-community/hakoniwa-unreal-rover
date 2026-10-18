@@ -86,7 +86,11 @@ private:
 	double LastRollDeg = 0.0;
 	double LastPitchDeg = 0.0;
 	double LastWheelFL = 0.0;
-	double LogTimer = 0.0;
+	double LogWindowStart = -1.0;
+	double LastFrameWall = -1.0;
+	double MaxFrameMs = 0.0;
+	int64 LogFrames = 0;
+	int64 FocusFrames = 0;
 	FString SyncShot;
 	double SyncShotAfter = 20.0;
 	bool bShotDone = false;
